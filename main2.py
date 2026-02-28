@@ -1,4 +1,5 @@
 import sqlite3
+import uuid
 import time
 import threading
 import os
@@ -72,20 +73,25 @@ def init_db():
     if not os.path.exists(BASE_DIR):
         os.makedirs(BASE_DIR)
     conn = sqlite3.connect(DB_PATH)
-    # Transactions table for the "Recent Activity" list
+    # History of all actions
     conn.execute('''CREATE TABLE IF NOT EXISTS transactions
                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     user_id TEXT,
                      type TEXT,
                      amount INTEGER,
                      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     
-    # System stats table to hold the permanent point balance
-    conn.execute('CREATE TABLE IF NOT EXISTS system_stats (key TEXT PRIMARY KEY, value INTEGER)')
-    # Set starting points to 0 if the table is empty
-    conn.execute('INSERT OR IGNORE INTO system_stats (key, value) VALUES ("total_points", 0)')
-    
+    # NEW: Table that links a Unique ID to a Point Balance
+    conn.execute('CREATE TABLE IF NOT EXISTS user_balances (user_id TEXT PRIMARY KEY, points INTEGER)')
     conn.commit()
     conn.close()
+
+def get_user_id():
+    # Check if the browser already has an ID cookie
+    uid = request.cookies.get('device_id')
+    if not uid:
+        uid = str(uuid.uuid4())[:8] # Create a new short unique ID
+    return uid
 
 # --- FLASK WEB SERVER ---
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
@@ -95,19 +101,22 @@ from flask import make_response # Add this to your imports at the top
 
 @app.route('/')
 def index():
-    # 1. Get points directly from the Orange Pi's Database
+    uid = get_user_id()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    res = conn.execute('SELECT value FROM system_stats WHERE key="total_points"').fetchone()
-    current_points = res['value'] if res else 0
     
-    # 2. Get history from DB
-    history = conn.execute('SELECT type, amount, timestamp FROM transactions ORDER BY timestamp DESC LIMIT 5').fetchall()
+    # Get balance for this specific device
+    res = conn.execute('SELECT points FROM user_balances WHERE user_id=?', (uid,)).fetchone()
+    current_points = res['points'] if res else 0
+    
+    # Get history for this device
+    history = conn.execute('SELECT type, amount, timestamp FROM transactions WHERE user_id=? ORDER BY timestamp DESC LIMIT 5', (uid,)).fetchall()
     conn.close()
-
-    # No more cookies needed here - we just pass the DB value to the template
-    return render_template('index.html', points=current_points, history=history)
-
+    
+    # Pass 'uid' into the render_template
+    response = make_response(render_template('index.html', points=current_points, history=history, device_id=uid))
+    response.set_cookie('device_id', uid, max_age=30*24*60*60)
+    return response
 
 
 @app.route('/api/start_session')
@@ -125,49 +134,44 @@ def get_count():
 @app.route('/api/stop_session')
 def stop_session():
     global session_data
-    added_points = session_data["count"]
-
-    if added_points > 0:
+    uid = request.cookies.get('device_id') # Identify who finished the session
+    
+    if session_data["active"] and session_data["count"] > 0 and uid:
+        added = session_data["count"]
         conn = sqlite3.connect(DB_PATH)
-        # UPDATE the permanent balance in the database
-        conn.execute('UPDATE system_stats SET value = value + ? WHERE key = "total_points"', (added_points,))
-        # Log to History
-        conn.execute('INSERT INTO transactions (type, amount) VALUES (?, ?)', ("Bottle Deposit", added_points))
+        # Update or Insert points for this specific user
+        conn.execute('''INSERT INTO user_balances (user_id, points) VALUES(?, ?)
+                        ON CONFLICT(user_id) DO UPDATE SET points = points + ?''', (uid, added, added))
+        
+        conn.execute('INSERT INTO transactions (user_id, type, amount) VALUES (?, ?, ?)', (uid, "Bottle Deposit", added))
         conn.commit()
         conn.close()
 
     session_data["active"] = False
     return jsonify(status="success")
 
-
 @app.route('/redeem/<int:slot>/<int:pts>')
 def redeem(slot, pts):
+    uid = request.cookies.get('device_id')
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    res = conn.execute('SELECT value FROM system_stats WHERE key="total_points"').fetchone()
-    current_pts = res['value'] if res else 0
+    res = conn.execute('SELECT points FROM user_balances WHERE user_id=?', (uid,)).fetchone()
+    current_pts = res['points'] if res else 0
 
     if current_pts >= pts:
-        # 1. Deduct from Database
-        conn.execute('UPDATE system_stats SET value = value - ? WHERE key = "total_points"', (pts,))
-        
-        # 2. Log History
-        slot_names = ["USB 1", "USB 2", "USB 3", "AC 220V"]
-        label = slot_names[slot] if slot < len(slot_names) else f"Slot {slot+1}"
-        conn.execute('INSERT INTO transactions (type, amount) VALUES (?, ?)', (f"Used {label}", -pts))
+        conn.execute('UPDATE user_balances SET points = points - ? WHERE user_id=?', (pts, uid))
+        conn.execute('INSERT INTO transactions (user_id, type, amount) VALUES (?, ?, ?)', (uid, "Redeemed", -pts))
         conn.commit()
         conn.close()
-
-        # 3. Hardware Control
+        
+        # Hardware logic...
         relay_pin = PINS_RELAYS[slot]
         GPIO.output(relay_pin, GPIO.LOW)
         threading.Thread(target=lambda: (time.sleep(300), GPIO.output(relay_pin, GPIO.HIGH))).start()
-        
         return redirect('/')
     else:
         conn.close()
         return "Insufficient Points!", 403
-
 
 
 # --- HARDWARE MANAGER ---
