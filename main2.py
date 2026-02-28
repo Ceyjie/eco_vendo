@@ -72,12 +72,18 @@ def init_db():
     if not os.path.exists(BASE_DIR):
         os.makedirs(BASE_DIR)
     conn = sqlite3.connect(DB_PATH)
-    # Create transactions table for history
-    conn.execute('''CREATE TABLE IF NOT EXISTS transactions 
-                    (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                     type TEXT, 
-                     amount INTEGER, 
+    # Transactions table for the "Recent Activity" list
+    conn.execute('''CREATE TABLE IF NOT EXISTS transactions
+                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     type TEXT,
+                     amount INTEGER,
                      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # System stats table to hold the permanent point balance
+    conn.execute('CREATE TABLE IF NOT EXISTS system_stats (key TEXT PRIMARY KEY, value INTEGER)')
+    # Set starting points to 0 if the table is empty
+    conn.execute('INSERT OR IGNORE INTO system_stats (key, value) VALUES ("total_points", 0)')
+    
     conn.commit()
     conn.close()
 
@@ -89,22 +95,20 @@ from flask import make_response # Add this to your imports at the top
 
 @app.route('/')
 def index():
-    # 1. Try to get points from the browser cookie
-    # We use 0 as the default if the cookie isn't found
-    saved_points = request.cookies.get('user_points', '0')
-    
-    # 2. Get history from DB (same as before)
+    # 1. Get points directly from the Orange Pi's Database
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    res = conn.execute('SELECT value FROM system_stats WHERE key="total_points"').fetchone()
+    current_points = res['value'] if res else 0
+    
+    # 2. Get history from DB
     history = conn.execute('SELECT type, amount, timestamp FROM transactions ORDER BY timestamp DESC LIMIT 5').fetchall()
     conn.close()
-    
-    # 3. Create the response and "bake" the cookie into it
-    response = make_response(render_template('index.html', points=saved_points, history=history))
-    
-    # We set the cookie to last for 30 days
-    response.set_cookie('user_points', saved_points, max_age=30*24*60*60)
-    return response
+
+    # No more cookies needed here - we just pass the DB value to the template
+    return render_template('index.html', points=current_points, history=history)
+
+
 
 @app.route('/api/start_session')
 def start_session():
@@ -122,66 +126,48 @@ def get_count():
 def stop_session():
     global session_data
     added_points = session_data["count"]
-    
-    # Get current points from the cookie
-    current_points = int(request.cookies.get('user_points', '0'))
-    new_total = current_points + added_points
 
-    # Log to DB History
     if added_points > 0:
         conn = sqlite3.connect(DB_PATH)
-        conn.execute('INSERT INTO transactions (type, amount) VALUES (?, ?)',
-                     ("Bottle Deposit", added_points))
+        # UPDATE the permanent balance in the database
+        conn.execute('UPDATE system_stats SET value = value + ? WHERE key = "total_points"', (added_points,))
+        # Log to History
+        conn.execute('INSERT INTO transactions (type, amount) VALUES (?, ?)', ("Bottle Deposit", added_points))
         conn.commit()
         conn.close()
 
     session_data["active"] = False
-    
-    # Send the new total back to the frontend
-    response = jsonify(status="success", new_points=new_total)
-    response.set_cookie('user_points', str(new_total), max_age=30*24*60*60)
-    return response
+    return jsonify(status="success")
 
-
-from flask import make_response # Ensure this is in your imports
 
 @app.route('/redeem/<int:slot>/<int:pts>')
 def redeem(slot, pts):
-    # 1. Get current points from the browser cookie (default to 0)
-    current_points = int(request.cookies.get('user_points', '0'))
-    
-    if current_points >= pts:
-        # 2. Calculate new balance
-        new_total = current_points - pts
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    res = conn.execute('SELECT value FROM system_stats WHERE key="total_points"').fetchone()
+    current_pts = res['value'] if res else 0
 
-        # 3. Log to Database History (for the dashboard table)
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            slot_names = ["USB 1", "USB 2", "USB 3", "AC 220V"]
-            label = slot_names[slot] if slot < len(slot_names) else f"Slot {slot+1}"
-            conn.execute('INSERT INTO transactions (type, amount) VALUES (?, ?)',
-                         (f"Used {label}", -pts))
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"Database logging error: {e}")
+    if current_pts >= pts:
+        # 1. Deduct from Database
+        conn.execute('UPDATE system_stats SET value = value - ? WHERE key = "total_points"', (pts,))
+        
+        # 2. Log History
+        slot_names = ["USB 1", "USB 2", "USB 3", "AC 220V"]
+        label = slot_names[slot] if slot < len(slot_names) else f"Slot {slot+1}"
+        conn.execute('INSERT INTO transactions (type, amount) VALUES (?, ?)', (f"Used {label}", -pts))
+        conn.commit()
+        conn.close()
 
-        # 4. Hardware Control (Relay ON)
+        # 3. Hardware Control
         relay_pin = PINS_RELAYS[slot]
         GPIO.output(relay_pin, GPIO.LOW)
-
-        def turn_off():
-            time.sleep(300) # 5 minutes
-            GPIO.output(relay_pin, GPIO.HIGH)
-
-        threading.Thread(target=turn_off).start()
-
-        # 5. Save the NEW balance back to the browser cookie
-        response = redirect('/')
-        response.set_cookie('user_points', str(new_total), max_age=30*24*60*60) # Lasts 30 days
-        return response
+        threading.Thread(target=lambda: (time.sleep(300), GPIO.output(relay_pin, GPIO.HIGH))).start()
+        
+        return redirect('/')
     else:
+        conn.close()
         return "Insufficient Points!", 403
+
 
 
 # --- HARDWARE MANAGER ---
@@ -204,12 +190,11 @@ def hardware_manager():
 
 # --- MAIN START ---
 if __name__ == '__main__':
-    init_db()
-    init_gpio()
+    init_db() #
+    init_gpio() #
     
-    # Start background hardware thread
-    threading.Thread(target=hardware_manager, daemon=True).start()
+    threading.Thread(target=hardware_manager, daemon=True).start() #
     
-    # Run server on Port 80
-    print("🌐 Visit http://192.168.254.181 on your laptop")
-    app.run(host='0.0.0.0', port=80)
+    # Updated for local network discovery
+    print("🌐 Visit http://eco-vendo.local on your phone or laptop")
+    app.run(host='0.0.0.0', port=80) #
