@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EcoCharge Vendo</title>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: #121212; 
+            color: white; 
+            text-align: center; 
+            margin: 0;
+            padding: 20px;
+        }
+        h1 { color: #4CAF50; margin-bottom: 30px; }
+        .card { 
+            background: #1e1e1e; 
+            border-radius: 15px; 
+            padding: 20px; 
+            margin: 15px auto; 
+            max-width: 500px;
+            border: 1px solid #333;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .btn { 
+            background: #4CAF50; 
+            border: none; 
+            padding: 15px 30px; 
+            color: white; 
+            border-radius: 10px; 
+            font-size: 1.1rem; 
+            font-weight: bold;
+            cursor: pointer; 
+            transition: transform 0.2s, background 0.2s;
+        }
+        .btn:hover { background: #45a049; transform: scale(1.05); }
+        .btn-redeem {
+            background: #2196F3;
+            padding: 10px 20px;
+            font-size: 0.9rem;
+            margin-top: 10px;
+        }
+        .slot-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .slot { 
+            background: #2a2a2a; 
+            padding: 15px; 
+            border-radius: 12px; 
+            border: 1px solid #444;
+        }
+        /* Modal Overlay */
+        #modal { 
+            display: none; 
+            position: fixed; 
+            top: 0; left: 0; 
+            width: 100%; height: 100%; 
+            background: rgba(0,0,0,0.95); 
+            z-index: 1000;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+        #count { font-size: 8rem; color: #4CAF50; margin: 20px 0; }
+        .points-display { font-size: 2rem; color: #FFC107; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h1>🌿 ECO-CHARGE VENDO</h1>
+
+    <div class="card">
+        <h3>Current Balance</h3>
+        <div class="points-display"><span id="pts">{{ points }}</span> Points</div>
+        <p>1 Bottle = 1 Point</p>
+        <button class="btn" onclick="startSession()">➕ INSERT BOTTLES</button>
+    </div>
+
+    <div class="card">
+        <h3>Redeem Credits</h3>
+        <p>Redeem 1 Point for 5 Minutes of Power</p>
+        <div class="slot-container">
+            <div class="slot">
+                <strong>USB Slot 1</strong><br>
+                <button class="btn btn-redeem" onclick="redeem(0)">Redeem</button>
+            </div>
+            <div class="slot">
+                <strong>USB Slot 2</strong><br>
+                <button class="btn btn-redeem" onclick="redeem(1)">Redeem</button>
+            </div>
+            <div class="slot">
+                <strong>USB Slot 3</strong><br>
+                <button class="btn btn-redeem" onclick="redeem(2)">Redeem</button>
+            </div>
+            <div class="slot">
+                <strong>AC 220V</strong><br>
+                <button class="btn btn-redeem" onclick="redeem(3)">Redeem</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="modal">
+        <h2>INSERT BOTTLES NOW</h2>
+        <p>Drop your bottles in the machine...</p>
+        <div id="count">0</div>
+        <button class="btn" style="background: #f44336;" onclick="stopSession()">FINISH & SAVE POINTS</button>
+    </div>
+<div class="card">
+    <h3>Recent Activity</h3>
+    <table style="width:100%; border-collapse: collapse; font-size: 0.9rem;">
+        <thead style="border-bottom: 1px solid #444; color: #888;">
+            <tr>
+                <th style="padding: 10px;">Action</th>
+                <th>Points</th>
+                <th>Time</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in history %}
+            <tr style="border-bottom: 1px solid #2a2a2a;">
+                <td style="padding: 10px;">{{ item.type }}</td>
+                <td style="color: {{ '#4CAF50' if item.amount > 0 else '#f44336' }};">
+                    {{ "+" if item.amount > 0 }}{{ item.amount }}
+                </td>
+                <td style="color: #666;">{{ item.timestamp.split(' ')[1] }}</td>
+            </tr>
+            {% endfor %}
+            {% if not history %}
+            <tr><td colspan="3" style="padding: 20px; color: #666;">No activity yet.</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+    <script>
+        let counterInterval;
+
+        function startSession() {
+            // Show the modal
+            document.getElementById('modal').style.display = 'flex';
+            
+            // Tell the backend to start listening for hardware button presses
+            fetch('/api/start_session')
+                .then(response => {
+                    // Start checking the count every 800ms
+                    counterInterval = setInterval(updateCount, 800);
+                });
+        }
+
+        function updateCount() {
+            fetch('/api/get_count')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('count').innerText = data.count;
+                })
+                .catch(err => console.error("Error fetching count:", err));
+        }
+
+        function stopSession() {
+            clearInterval(counterInterval);
+            fetch('/api/stop_session')
+                .then(() => {
+                    // Hide modal and refresh page to show new points
+                    document.getElementById('modal').style.display = 'none';
+                    location.reload();
+                });
+        }
+
+        function redeem(slotId) {
+            // Redirect to the redemption URL handled by main.py
+            window.location.href = `/redeem/${slotId}/1`;
+        }
+    </script>
+</body>
+</html>
