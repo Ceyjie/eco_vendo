@@ -74,7 +74,8 @@ def init_db():
     conn.close()
 
 # --- FLASK WEB SERVER ---
-app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
+app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
+static_folder=os.path.join(BASE_DIR, "static"))
 
 @app.route('/')
 def index():
