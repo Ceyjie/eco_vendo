@@ -6,7 +6,7 @@ import subprocess
 import signal
 import atexit
 import sys
-from flask import Flask, render_template, request, redirect, jsonify
+from flask import Flask, render_template, request, redirect, jsonify, make_response
 import OPi.GPIO as GPIO 
 
 # --- SETTINGS ---
@@ -52,24 +52,32 @@ def init_gpio():
     GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BOARD)
 
-    # Setup Relays: HIGH = OFF (Relay modules are usually active-low)
+    # Forcefully setup EVERY Relay Pin in the list
     for pin in PINS_RELAYS:
         try:
+            # Tell the Orange Pi this pin is an OUTPUT
             GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH)
-            print(f"✅ Relay Pin {pin} initialized.")
+            print(f"✅ Hardware Ready: Relay Pin {pin} (Slot {PINS_RELAYS.index(pin)+1})")
         except Exception as e:
-            print(f"⚠️ Error on Pin {pin}: {e}")
+            print(f"❌ Hardware Error: Pin {pin} failed: {e}")
 
+    # Setup the Bottle Counter Button
     GPIO.setup(PIN_BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(PIN_EXTRA, GPIO.OUT, initial=GPIO.LOW)
-    print("🚀 GPIO Setup Complete!")
+    print("🚀 All Hardware Channels Configured!")
+
 
 # --- DATABASE SETUP ---
 def init_db():
     if not os.path.exists(BASE_DIR):
         os.makedirs(BASE_DIR)
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('CREATE TABLE IF NOT EXISTS users (mac TEXT PRIMARY KEY, points INTEGER DEFAULT 0)')
+    # Create transactions table for history
+    conn.execute('''CREATE TABLE IF NOT EXISTS transactions 
+                    (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                     type TEXT, 
+                     amount INTEGER, 
+                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
@@ -77,9 +85,26 @@ def init_db():
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
 static_folder=os.path.join(BASE_DIR, "static"))
 
+from flask import make_response # Add this to your imports at the top
+
 @app.route('/')
 def index():
-    return render_template('index.html', points=user_points)
+    # 1. Try to get points from the browser cookie
+    # We use 0 as the default if the cookie isn't found
+    saved_points = request.cookies.get('user_points', '0')
+    
+    # 2. Get history from DB (same as before)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    history = conn.execute('SELECT type, amount, timestamp FROM transactions ORDER BY timestamp DESC LIMIT 5').fetchall()
+    conn.close()
+    
+    # 3. Create the response and "bake" the cookie into it
+    response = make_response(render_template('index.html', points=saved_points, history=history))
+    
+    # We set the cookie to last for 30 days
+    response.set_cookie('user_points', saved_points, max_age=30*24*60*60)
+    return response
 
 @app.route('/api/start_session')
 def start_session():
@@ -95,33 +120,69 @@ def get_count():
 
 @app.route('/api/stop_session')
 def stop_session():
-    global session_data, user_points
+    global session_data
+    added_points = session_data["count"]
+    
+    # Get current points from the cookie
+    current_points = int(request.cookies.get('user_points', '0'))
+    new_total = current_points + added_points
+
+    # Log to DB History
+    if added_points > 0:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute('INSERT INTO transactions (type, amount) VALUES (?, ?)',
+                     ("Bottle Deposit", added_points))
+        conn.commit()
+        conn.close()
+
     session_data["active"] = False
-    user_points += session_data["count"]
-    print(f"🏁 Session Stopped: Saved {session_data['count']} points. Total: {user_points}")
-    return jsonify(status="success")
+    
+    # Send the new total back to the frontend
+    response = jsonify(status="success", new_points=new_total)
+    response.set_cookie('user_points', str(new_total), max_age=30*24*60*60)
+    return response
+
+
+from flask import make_response # Ensure this is in your imports
 
 @app.route('/redeem/<int:slot>/<int:pts>')
 def redeem(slot, pts):
-    global user_points
-    if user_points >= pts:
-        user_points -= pts
+    # 1. Get current points from the browser cookie (default to 0)
+    current_points = int(request.cookies.get('user_points', '0'))
+    
+    if current_points >= pts:
+        # 2. Calculate new balance
+        new_total = current_points - pts
+
+        # 3. Log to Database History (for the dashboard table)
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            slot_names = ["USB 1", "USB 2", "USB 3", "AC 220V"]
+            label = slot_names[slot] if slot < len(slot_names) else f"Slot {slot+1}"
+            conn.execute('INSERT INTO transactions (type, amount) VALUES (?, ?)',
+                         (f"Used {label}", -pts))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Database logging error: {e}")
+
+        # 4. Hardware Control (Relay ON)
         relay_pin = PINS_RELAYS[slot]
-        
-        # Turn relay ON (Active Low)
         GPIO.output(relay_pin, GPIO.LOW)
-        print(f"⚡ Slot {slot} (Pin {relay_pin}) activated for 5 minutes!")
-        
-        # Start a thread to turn the relay off after 300 seconds (5 mins)
+
         def turn_off():
-            time.sleep(300)
+            time.sleep(300) # 5 minutes
             GPIO.output(relay_pin, GPIO.HIGH)
-            print(f"🔌 Slot {slot} deactivated.")
-            
+
         threading.Thread(target=turn_off).start()
-        return redirect('/')
+
+        # 5. Save the NEW balance back to the browser cookie
+        response = redirect('/')
+        response.set_cookie('user_points', str(new_total), max_age=30*24*60*60) # Lasts 30 days
+        return response
     else:
         return "Insufficient Points!", 403
+
 
 # --- HARDWARE MANAGER ---
 def hardware_manager():
