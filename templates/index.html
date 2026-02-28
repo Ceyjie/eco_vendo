@@ -4,199 +4,83 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>EcoCharge Vendo</title>
-    <style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: #121212;
-            color: white;
-            text-align: center;
-            margin: 0;
-            padding: 20px;
-        }
-        h1 { color: #4CAF50; margin-bottom: 10px; }
-        .card {
-            background: #1e1e1e;
-            border-radius: 15px;
-            padding: 20px;
-            margin: 15px auto;
-            max-width: 500px;
-            border: 1px solid #333;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-        }
-        .btn {
-            background: #4CAF50;
-            border: none;
-            padding: 15px 30px;
-            color: white;
-            border-radius: 10px;
-            font-size: 1.1rem;
-            font-weight: bold;
-            cursor: pointer;
-            transition: transform 0.2s, background 0.2s;
-        }
-        .btn:hover { background: #45a049; transform: scale(1.05); }
-        .btn-redeem {
-            background: #2196F3;
-            padding: 10px 20px;
-            font-size: 0.9rem;
-            margin-top: 10px;
-        }
-        .slot-container {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            margin-top: 20px;
-        }
-        .slot {
-            background: #2a2a2a;
-            padding: 15px;
-            border-radius: 12px;
-            border: 1px solid #444;
-        }
-        /* Modal Overlay */
-        #modal {
-            display: none;
-            position: fixed;
-            top: 0; left: 0;
-            width: 100%; height: 100%;
-            background: rgba(0,0,0,0.95);
-            z-index: 1000;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-        }
-        #count { font-size: 8rem; color: #4CAF50; margin: 20px 0; }
-        .points-display { font-size: 2.5rem; color: #FFC107; font-weight: bold; margin: 10px 0; }
-        .device-badge {
-            font-size: 0.75rem;
-            color: #888;
-            letter-spacing: 1px;
-            margin-bottom: 15px;
-        }
-        .device-id {
-            color: #4CAF50;
-            font-family: monospace;
-            font-weight: bold;
-        }
-    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 
     <div style="margin-top: 10px;">
-        <img src="{{ url_for('static', filename='logo.png') }}"
-             alt="RayCharge Logo"
-             style="width: 120px; height: 120px; border-radius: 50%; border: 3px solid #4CAF50; background: white; padding: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.3);">
+        <img src="{{ url_for('static', filename='logo.png') }}" class="logo-img" onclick="handleLogoClick()">
     </div>
 
     <div class="card">
         <h1>🌿 ECO-CHARGE VENDO</h1>
-        <div style="font-family: 'Verdana', sans-serif; font-style: italic; color: #4CAF50; font-size: 1.1rem; line-height: 1.4;">
-            "Powered by rays"<br>
-            "Designed for change"
+        <div style="font-family: 'Verdana', sans-serif; font-style: italic; color: #4CAF50; font-size: 1.1rem;">
+            "Powered by rays"<br>"Designed for change"
         </div>
     </div>
 
+    <div id="timer-list"></div>
+
     <div class="card">
-        <div class="device-badge">
-            DEVICE ID: <span class="device-id">{{ device_id }}</span>
-        </div>
-        <h3 style="margin: 0; color: #aaa;">Current Balance</h3>
-        <div class="points-display"><span id="pts">{{ points }}</span> Points</div>
-        <p style="margin-bottom: 20px; font-size: 0.9rem; color: #888;">1 Bottle = 1 Point</p>
+        <div style="font-size: 0.75rem; color: #888;">DEVICE ID: <span style="color:#4CAF50; font-family:monospace;">{{ device_id }}</span></div>
+        <div class="points-display">{{ points }} Points</div>
         <button class="btn" onclick="startSession()">➕ INSERT BOTTLES</button>
     </div>
 
     <div class="card">
-        <h3 style="margin-top: 0;">Redeem Credits</h3>
-        <p style="font-size: 0.9rem; color: #aaa;">Redeem 1 Point for 5 Minutes of Power</p>
-        <div class="slot-container">
-            <div class="slot">
-                <strong>USB Slot 1</strong><br>
-                <button class="btn btn-redeem" onclick="redeem(0)">Redeem</button>
-            </div>
-            <div class="slot">
-                <strong>USB Slot 2</strong><br>
-                <button class="btn btn-redeem" onclick="redeem(1)">Redeem</button>
-            </div>
-            <div class="slot">
-                <strong>USB Slot 3</strong><br>
-                <button class="btn btn-redeem" onclick="redeem(2)">Redeem</button>
-            </div>
-            <div class="slot">
-                <strong>AC 220V</strong><br>
-                <button class="btn btn-redeem" onclick="redeem(3)">Redeem</button>
-            </div>
+    <h3 style="margin-top: 0;">Redeem Credits</h3>
+    <p style="font-size: 0.9rem; color: #aaa;">1 Point = 5 Minutes of Power</p>
+    <div class="slot-container">
+        <div class="slot" id="slot-0"><strong>USB 1</strong><br><button class="btn btn-redeem" onclick="openRedeemModal(0, 'USB Slot 1')">Redeem</button><div class="busy-label">BUSY</div></div>
+        <div class="slot" id="slot-1"><strong>USB 2</strong><br><button class="btn btn-redeem" onclick="openRedeemModal(1, 'USB Slot 2')">Redeem</button><div class="busy-label">BUSY</div></div>
+        <div class="slot" id="slot-2"><strong>USB 3</strong><br><button class="btn btn-redeem" onclick="openRedeemModal(2, 'USB Slot 3')">Redeem</button><div class="busy-label">BUSY</div></div>
+        <div class="slot" id="slot-3"><strong>AC 220V</strong><br><button class="btn btn-redeem" onclick="openRedeemModal(3, 'AC 220V')">Redeem</button><div class="busy-label">BUSY</div></div>
+    </div>
+</div>
+
+<div id="redeem-confirm-modal" class="modal-overlay">
+    <div class="card" style="width: 85%;">
+        <h3 id="modal-slot-name">Redeem Points</h3>
+        <p style="color: #888;">How many points do you want to use?</p>
+        
+        <input type="number" id="pts-to-use" value="1" min="1" 
+               style="font-size: 3rem; width: 120px; text-align: center; background: #2a2a2a; border: 2px solid #4CAF50; color: white; border-radius: 10px; margin: 10px 0;">
+        
+        <p id="time-preview" style="color: #4CAF50; font-weight: bold;">= 5 Minutes</p>
+        
+        <div style="margin-top: 20px;">
+            <button class="btn" onclick="confirmRedeem()">⚡ START CHARGING</button>
+            <button class="btn" style="background: #555; margin-top: 10px; width: 100%;" onclick="closeModal('redeem-confirm-modal')">CANCEL</button>
+        </div>
+    </div>
+</div>
+
+
+    <div id="modal" class="modal-overlay">
+        <h2>INSERT BOTTLES NOW</h2>
+        <div id="count" style="font-size:8rem; color:#4CAF50;">0</div>
+        <button class="btn" style="background:#f44336;" onclick="stopSession()">SAVE POINTS</button>
+    </div>
+
+    <div id="admin-login-modal" class="modal-overlay">
+        <div class="card" style="width: 80%;">
+            <h3>Admin Access</h3>
+            <input type="password" id="admin-pass-input" placeholder="Password" style="padding:10px; width:80%; margin-bottom:10px; border-radius:5px; border:none;">
+            <br>
+            <button class="btn" onclick="verifyAdmin()">Login</button>
+            <button class="btn" style="background:#555; margin-left:5px;" onclick="closeModal('admin-login-modal')">Cancel</button>
         </div>
     </div>
 
-    <div class="card">
-        <h3 style="margin-top: 0;">Recent Activity</h3>
-        <table style="width:100%; border-collapse: collapse; font-size: 0.9rem; margin-top: 10px;">
-            <thead style="border-bottom: 1px solid #444; color: #888;">
-                <tr>
-                    <th style="padding: 10px; text-align: left;">Action</th>
-                    <th style="text-align: center;">Pts</th>
-                    <th style="text-align: right; padding-right: 10px;">Time</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for item in history %}
-                <tr style="border-bottom: 1px solid #2a2a2a;">
-                    <td style="padding: 12px 10px; text-align: left;">{{ item.type }}</td>
-                    <td style="text-align: center; font-weight: bold; color: {{ '#4CAF50' if item.amount > 0 else '#f44336' }};">
-                        {{ "+" if item.amount > 0 }}{{ item.amount }}
-                    </td>
-                    <td style="text-align: right; color: #666; padding-right: 10px;">{{ item.timestamp.split(' ')[1] }}</td>
-                </tr>
-                {% endfor %}
-                {% if not history %}
-                <tr><td colspan="3" style="padding: 20px; color: #666;">No activity for this device yet.</td></tr>
-                {% endif %}
-            </tbody>
-        </table>
+    <div id="admin-panel-modal" class="modal-overlay">
+        <div class="card" style="width: 90%; max-height: 80vh; overflow-y: auto;">
+            <h2 style="color:#2196F3;">Admin Panel</h2>
+            <button class="btn" style="background:#f44336; width:100%; margin-bottom:15px;" onclick="resetAll()">🛑 RESET ALL TIMERS</button>
+            <div id="admin-user-list"></div>
+            <button class="btn" style="background:#555; margin-top:15px;" onclick="closeModal('admin-panel-modal')">Close</button>
+        </div>
     </div>
 
-    <div id="modal">
-        <h2 style="color: white;">INSERT BOTTLES NOW</h2>
-        <p style="color: #4CAF50;">The machine is ready for your bottles...</p>
-        <div id="count">0</div>
-        <button class="btn" style="background: #f44336;" onclick="stopSession()">FINISH & SAVE POINTS</button>
-    </div>
-
-    <script>
-        let counterInterval;
-
-        function startSession() {
-            document.getElementById('modal').style.display = 'flex';
-            fetch('/api/start_session')
-                .then(response => {
-                    counterInterval = setInterval(updateCount, 800);
-                });
-        }
-
-        function updateCount() {
-            fetch('/api/get_count')
-                .then(r => r.json())
-                .then(data => {
-                    document.getElementById('count').innerText = data.count;
-                })
-                .catch(err => console.error("Error fetching count:", err));
-        }
-
-        function stopSession() {
-            clearInterval(counterInterval);
-            fetch('/api/stop_session')
-                .then(() => {
-                    document.getElementById('modal').style.display = 'none';
-                    location.reload();
-                });
-        }
-
-        function redeem(slotId) {
-            if(confirm("Use 1 point to activate this slot?")) {
-                window.location.href = `/redeem/${slotId}/1`;
-            }
-        }
-    </script>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>

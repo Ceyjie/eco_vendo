@@ -1,0 +1,70 @@
+body {
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    background: #121212;
+    color: white;
+    text-align: center;
+    margin: 0;
+    padding: 20px;
+}
+.card {
+    background: #1e1e1e;
+    border-radius: 15px;
+    padding: 20px;
+    margin: 15px auto;
+    max-width: 500px;
+    border: 1px solid #333;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+}
+.logo-img {
+    width: 120px; height: 120px;
+    border-radius: 50%;
+    border: 3px solid #4CAF50;
+    background: white;
+    padding: 5px;
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+.logo-img:active { transform: scale(0.95); }
+.btn {
+    background: #4CAF50;
+    border: none;
+    padding: 15px 30px;
+    color: white;
+    border-radius: 10px;
+    font-weight: bold;
+    cursor: pointer;
+}
+.btn-redeem {
+    background: #2196F3;
+    padding: 10px;
+    font-size: 0.9rem;
+    margin-top: 10px;
+    width: 100%;
+}
+.slot-container {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    margin-top: 20px;
+}
+.slot {
+    background: #2a2a2a;
+    padding: 15px;
+    border-radius: 12px;
+    border: 1px solid #444;
+}
+.modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: rgba(0,0,0,0.95);
+    z-index: 1000;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+}
+.points-display { font-size: 2.5rem; color: #FFC107; font-weight: bold; }
+.admin-table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.85rem; }
+.admin-table th, .admin-table td { border: 1px solid #444; padding: 10px; text-align: left; }
+.busy-label { color: #f44336; font-size: 0.7rem; font-weight: bold; margin-top: 5px; display: none; }
