@@ -71,18 +71,10 @@ function refreshAdmin() {
 function updateAdminPts(uid, action) { fetch(`/api/admin_update_points?uid=${uid}&action=${action}`).then(() => refreshAdmin()); }
 function emergencyReset() { if(confirm("STOP ALL SLOTS?")) fetch('/api/admin_reset').then(() => location.reload()); }
 function openRedeemModal(id) { currentSlot = id; document.getElementById('redeem-modal').style.display = 'flex'; }
-function adjustPoints(val) { 
-	let i = document.getElementById('pts-to-redeem'); 
-	let c = parseInt(i.value); 
-	if (c + val >= 1) i.value = c + val; }
+function closeRedeemModal() { document.getElementById('redeem-modal').style.display = 'none'; }
+function adjustPoints(val) { let i = document.getElementById('pts-to-redeem'); let c = parseInt(i.value); if (c + val >= 1) i.value = c + val; }
 function confirmRedeem() {
     const req = parseInt(document.getElementById('pts-to-redeem').value);
-    if (req > userPoints) { 
-        alert("Insufficient Points"); 
-        return; 
-    }
+    if (req > userPoints) { alert("Insufficient Points"); return; }
     location.href = `/redeem/${currentSlot}/${req}`;
-}
-function closeRedeemModal() { 
-    document.getElementById('redeem-modal').style.display = 'none'; 
 }

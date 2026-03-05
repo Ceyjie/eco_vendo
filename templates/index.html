@@ -23,32 +23,30 @@
         {% for log in logs %}<tr><td>{{ log[0] }}</td><td style="color:var(--orange);font-weight:700;">{{ log[1] }}</td><td style="text-align:right;opacity:0.5;">{{ log[2] }}</td></tr>{% endfor %}
     </table></div>
 </div>
+
 <div id="admin-auth" class="modal-overlay"><div class="modal-content" style="width:280px;">
     <h3>SECURITY CHECK</h3><input type="password" id="admin-pass-input" class="admin-login-input" placeholder="••••">
     <button class="btn-insert" onclick="loginAdmin()">VERIFY</button>
 </div></div>
+
 <div id="admin-panel" class="modal-overlay"><div class="modal-content">
     <h3 style="margin-top:0;">ADMIN DASHBOARD</h3>
     <div class="admin-stats-bar">TOTAL BOTTLES: <span id="total-bottles">0</span></div>
     <div id="admin-list" style="max-height:250px; overflow-y:auto; margin-bottom:15px;"></div>
     <button class="btn-emergency" onclick="emergencyReset()">Emergency Reset</button>
     <button class="btn-insert" style="margin-top:10px; background:#333;" onclick="document.getElementById('admin-panel').style.display='none'">CLOSE</button>
-<div id="redeem-modal" class="modal-overlay">
-    <div class="modal-content">
-        <h3>REDEEM</h3>
-        <div id="redeem-error" style="color: var(--error); font-size: 0.8rem; height: 1.2rem; margin-bottom: 5px; font-weight: 700;"></div>
-        
-        <div style="display:flex; align-items:center; justify-content:center; margin:10px 0 20px;">
-            <button onclick="adjustPoints(-1)" style="width:40px;height:40px;border-radius:50%;background:#333;color:white;border:none;">-</button>
-            <input type="number" id="pts-to-redeem" value="1" readonly style="width:80px;background:none;border:none;color:white;font-size:3rem;font-weight:800;text-align:center;">
-            <button onclick="adjustPoints(1)" style="width:40px;height:40px;border-radius:50%;background:#333;color:white;border:none;">+</button>
-        </div>
-        
-        <button class="btn-redeem" style="padding:15px;" onclick="confirmRedeem()">CONFIRM</button>
-        
-        <button class="btn-insert" style="margin-top:10px; background:#333; padding:10px;" onclick="closeRedeemModal()">BACK</button>
+</div></div>
+
+<div id="redeem-modal" class="modal-overlay"><div class="modal-content">
+    <h3>REDEEM</h3><div style="display:flex; align-items:center; justify-content:center; margin:20px 0;">
+        <button onclick="adjustPoints(-1)" style="width:40px;height:40px;border-radius:50%;background:#333;color:white;border:none;">-</button>
+        <input type="number" id="pts-to-redeem" value="1" readonly style="width:80px;background:none;border:none;color:white;font-size:3rem;font-weight:800;text-align:center;">
+        <button onclick="adjustPoints(1)" style="width:40px;height:40px;border-radius:50%;background:#333;color:white;border:none;">+</button>
     </div>
-</div>
+    <button class="btn-redeem" style="padding:15px;" onclick="confirmRedeem()">CONFIRM</button>
+    <button class="btn-insert" style="margin-top:10px; background:#333;" onclick="closeRedeemModal()">BACK</button>
+</div></div>
+
 <div id="insert-modal" class="modal-overlay"><div class="modal-content"><h2>INSERTING...</h2><div id="live-count" style="font-size:5rem;color:var(--green);">0</div><button class="btn-insert" style="background:red;" onclick="stopSession()">DONE</button></div></div>
 <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body></html>

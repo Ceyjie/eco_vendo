@@ -120,4 +120,4 @@ def hw_loop():
 if __name__ == '__main__':
     init_hw(); init_db()
     threading.Thread(target=hw_loop, daemon=True).start()
-    app.run(host='0.0.0.0', port=5000) # Changed from 80 to 5000
+    app.run(host='0.0.0.0', port=80) # Changed from 80 to 5000
