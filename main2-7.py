@@ -1,5 +1,5 @@
-import time, threading, os, subprocess, signal, sys, sqlite3
-from flask import Flask, render_template, request, jsonify, redirect
+import time, threading, os, subprocess, signal, sys, sqlite3, uuid
+from flask import Flask, render_template, request, jsonify, redirect, session
 from RPLCD.i2c import CharLCD
 
 # --- CONFIG ---
@@ -14,7 +14,7 @@ SLOT_NAMES = ["USB 1", "USB 2", "USB 3", "AC 220V"]
 DB_FILE = "vendo.db"
 
 # --- STATE ---
-session_data = {"active": False, "count": 0}
+session_data = {"active": False, "count": 0, "current_user": None}
 slot_status  = {0: 0, 1: 0, 2: 0, 3: 0}
 ui_state     = {"state": "IDLE", "selected_slot": 0}
 
@@ -24,38 +24,28 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (user_id TEXT PRIMARY KEY, points INTEGER DEFAULT 0)''')
-    c.execute("INSERT OR IGNORE INTO users (user_id, points) VALUES ('LOCAL_USER', 0)")
     c.execute('''CREATE TABLE IF NOT EXISTS stats (total_bottles INTEGER)''')
     c.execute("SELECT * FROM stats")
     if not c.fetchone(): c.execute("INSERT INTO stats VALUES (0)")
     conn.commit()
     conn.close()
 
-def update_points(pts):
+def update_user_points(uid, pts):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("UPDATE users SET points = points + ? WHERE user_id = 'LOCAL_USER'", (pts,))
-    c.execute("UPDATE stats SET total_bottles = total_bottles + ?", (pts,))
+    c.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (pts, uid))
+    if pts > 0:
+        c.execute("UPDATE stats SET total_bottles = total_bottles + ?", (pts,))
     conn.commit()
     conn.close()
 
-def get_points():
+def get_user_points(uid):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT points FROM users WHERE user_id = 'LOCAL_USER'")
-    pts = c.fetchone()[0]
+    c.execute("SELECT points FROM users WHERE user_id = ?", (uid,))
+    row = c.fetchone()
     conn.close()
-    return pts
-
-def get_admin_stats():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT total_bottles FROM stats")
-    total = c.fetchone()[0]
-    c.execute("SELECT user_id, points FROM users")
-    users = [{"user_id": r[0], "points": r[1]} for r in c.fetchall()]
-    conn.close()
-    return total, users
+    return row[0] if row else 0
 
 # --- GPIO HELPERS ---
 def gpio_setup(pin, direction="in", value="1"):
@@ -97,21 +87,9 @@ def lcd_write(lines):
     except: pass
 
 def format_time(seconds):
-    mins = seconds // 60
-    secs = seconds % 60
-    return f"{mins}:{secs:02d}"
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
-# --- EXIT HANDLER ---
-def close_app(sig, frame):
-    if lcd:
-        lcd.clear()
-        lcd.backlight_enabled = False
-    for p in PINS_RELAYS: gpio_write(p, 1)
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, close_app)
-
-# --- HARDWARE LOGIC ---
+# --- LOGIC ---
 def run_relay_timer(slot, seconds):
     gpio_write(PINS_RELAYS[slot], 0)
     while seconds > 0:
@@ -121,61 +99,31 @@ def run_relay_timer(slot, seconds):
     gpio_write(PINS_RELAYS[slot], 1)
     slot_status[slot] = 0
 
-def on_btn_start():
+def on_btn_start(uid="LOCAL"):
     if ui_state["state"] in ["IDLE", "DONE"]:
         ui_state["state"] = "INSERTING"
-        session_data.update({"active": True, "count": 0})
+        session_data.update({"active": True, "count": 0, "current_user": uid})
         gpio_write(PIN_BUZZER, 1); time.sleep(0.1); gpio_write(PIN_BUZZER, 0)
-        lcd_write(["   INSERT BOTTLE", "", " TOTAL BOTTLES: 0", " [CONFIRM] to Save"])
-
-def on_btn_select():
-    if ui_state["state"] == "SELECTING":
-        ui_state["selected_slot"] = (ui_state["selected_slot"] + 1) % 4
-        slot = ui_state["selected_slot"]
-        lcd_write([" SELECT OUTPUT:", f" > {SLOT_NAMES[slot]}", " [CONFIRM] to start", " [SELECT] to cycle"])
+        lcd_write(["   INSERT BOTTLE", f" ID: {uid}", " BOTTLES: 0", " [DONE] via App"])
 
 def on_btn_confirm():
     if ui_state["state"] == "INSERTING":
+        uid = session_data["current_user"]
         if session_data["count"] > 0:
-            update_points(session_data["count"])
-        ui_state["state"] = "IDLE" # Return to IDLE so user can redeem on Web or HW
-        session_data["active"] = False
-        lcd_write([" BOTTLES SAVED!", " Points Updated", " Use App/Buttons", " to Redeem"])
-        time.sleep(2)
-    
-    elif ui_state["state"] == "SELECTING":
-        # This handles physical redemption if you press physical buttons
-        slot = ui_state["selected_slot"]
-        current_pts = get_points()
-        if current_pts > 0:
-            update_points(-1) # Redeem 1 unit (5 mins) per HW confirm
-            threading.Thread(target=run_relay_timer, args=(slot, 300), daemon=True).start()
-            ui_state["state"] = "DONE"
-            lcd_write(["   ACTIVATED!", f" Slot: {SLOT_NAMES[slot]}", " Time: 5 mins", " Returning..."])
-            time.sleep(3)
+            update_user_points(uid, session_data["count"])
         ui_state["state"] = "IDLE"
+        session_data["active"] = False
+        lcd_write([" BOTTLES SAVED!", " Points Updated", " Returning...", ""])
+        time.sleep(2)
 
 # --- LOOPS ---
-def display_manager():
-    while True:
-        if ui_state["state"] == "IDLE":
-            timer_row3 = f"U1:{format_time(slot_status[0])} U2:{format_time(slot_status[1])}"
-            timer_row4 = f"U3:{format_time(slot_status[2])} AC:{format_time(slot_status[3])}"
-            lcd_write(["      ECO VENDO", f"   POINTS: {get_points()}", timer_row3, timer_row4])
-        time.sleep(1)
-
 def hardware_loop():
     last = {PIN_BTN_START: 1, PIN_BTN_SELECT: 1, PIN_BTN_CONFIRM: 1}
     while True:
         for p in [PIN_BTN_START, PIN_BTN_SELECT, PIN_BTN_CONFIRM]:
             val = gpio_read(p)
             if val == 0 and last[p] == 1:
-                if p == PIN_BTN_START: on_btn_start()
-                elif p == PIN_BTN_SELECT: 
-                    if ui_state["state"] == "IDLE": # Optional: Enter selection mode from IDLE
-                        ui_state["state"] = "SELECTING"
-                        on_btn_select()
-                    else: on_btn_select()
+                if p == PIN_BTN_START: on_btn_start("LOCAL")
                 elif p == PIN_BTN_CONFIRM: on_btn_confirm()
                 time.sleep(0.2)
             last[p] = val
@@ -184,29 +132,46 @@ def hardware_loop():
             if gpio_read(PIN_IR_BOTTOM) == 0 and gpio_read(PIN_IR_TOP) == 0:
                 session_data["count"] += 1
                 gpio_write(PIN_BUZZER, 1); time.sleep(0.1); gpio_write(PIN_BUZZER, 0)
-                lcd_write(["   INSERT BOTTLE", "", f" TOTAL BOTTLES: {session_data['count']}", " [CONFIRM] to Save"])
+                lcd_write(["   INSERT BOTTLE", f" ID: {session_data['current_user']}", f" BOTTLES: {session_data['count']}", " [DONE] via App"])
                 time.sleep(0.7)
         time.sleep(0.05)
 
+def display_manager():
+    while True:
+        if ui_state["state"] == "IDLE":
+            t1 = f"U1:{format_time(slot_status[0])} U2:{format_time(slot_status[1])}"
+            t2 = f"U3:{format_time(slot_status[2])} AC:{format_time(slot_status[3])}"
+            lcd_write(["      ECO VENDO", "   READY TO SCAN", t1, t2])
+        time.sleep(1)
+
 # --- FLASK ---
 app = Flask(__name__)
+app.secret_key = "eco_music_99"
 
 @app.route('/')
 def index():
-    return render_template('index.html', device_id="ORANGE-PI-01", points=get_points(), logs=[])
+    if 'user_id' not in session:
+        session['user_id'] = str(uuid.uuid4())[:6].upper()
+    uid = session['user_id']
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO users (user_id, points) VALUES (?, 0)", (uid,))
+    conn.commit()
+    conn.close()
+    return render_template('index.html', device_id=uid, points=get_user_points(uid), logs=[])
 
 @app.route('/api/status')
 def get_status():
     return jsonify({
         "session": session_data["count"],
-        "points": get_points(),
+        "points": get_user_points(session.get('user_id', '')),
         "slots": [slot_status[0], slot_status[1], slot_status[2], slot_status[3]],
         "state": ui_state["state"]
     })
 
 @app.route('/api/start_session')
 def start_api():
-    on_btn_start()
+    on_btn_start(session.get('user_id', 'GUEST'))
     return jsonify({"status": "started"})
 
 @app.route('/api/stop_session')
@@ -216,26 +181,29 @@ def stop_api():
 
 @app.route('/redeem/<int:slot>/<int:pts>')
 def redeem_web(slot, pts):
-    if get_points() < pts: return "Insufficient points", 400
-    if slot_status[slot] > 0: return "Slot busy", 400
-    
-    update_points(-pts)
-    total_seconds = pts * 300
-    threading.Thread(target=run_relay_timer, args=(slot, total_seconds), daemon=True).start()
-    
-    ui_state["state"] = "DONE"
-    lcd_write(["  WEB REDEMPTION", f" Slot: {SLOT_NAMES[slot]}", f" Time: {pts*5} mins", " Enjoy!"])
-    
-    def auto_idle():
-        time.sleep(3)
-        ui_state["state"] = "IDLE"
-    threading.Thread(target=auto_idle, daemon=True).start()
+    uid = session.get('user_id')
+    if get_user_points(uid) < pts: return "Error", 400
+    if slot_status[slot] > 0: return "Busy", 400
+    update_user_points(uid, -pts)
+    threading.Thread(target=run_relay_timer, args=(slot, pts * 300), daemon=True).start()
     return redirect('/')
 
 @app.route('/api/admin_stats')
 def admin_stats():
-    total, users = get_admin_stats()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT total_bottles FROM stats")
+    total = c.fetchone()[0]
+    c.execute("SELECT user_id, points FROM users")
+    users = [{"user_id": r[0], "points": r[1]} for r in c.fetchall()]
+    conn.close()
     return jsonify({"total_bottles": total, "users": users})
+
+@app.route('/api/admin_update_points')
+def admin_update():
+    uid, act = request.args.get('uid'), request.args.get('action')
+    update_user_points(uid, 1 if act == 'add' else -1)
+    return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
     init_db()
