@@ -1,70 +1,22 @@
-body {
-    font-family: 'Segoe UI', Tahoma, sans-serif;
-    background: #121212;
-    color: white;
-    text-align: center;
-    margin: 0;
-    padding: 20px;
-}
-.card {
-    background: #1e1e1e;
-    border-radius: 15px;
-    padding: 20px;
-    margin: 15px auto;
-    max-width: 500px;
-    border: 1px solid #333;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-}
-.logo-img {
-    width: 120px; height: 120px;
-    border-radius: 50%;
-    border: 3px solid #4CAF50;
-    background: white;
-    padding: 5px;
-    cursor: pointer;
-    transition: transform 0.1s;
-}
-.logo-img:active { transform: scale(0.95); }
-.btn {
-    background: #4CAF50;
-    border: none;
-    padding: 15px 30px;
-    color: white;
-    border-radius: 10px;
-    font-weight: bold;
-    cursor: pointer;
-}
-.btn-redeem {
-    background: #2196F3;
-    padding: 10px;
-    font-size: 0.9rem;
-    margin-top: 10px;
-    width: 100%;
-}
-.slot-container {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 15px;
-    margin-top: 20px;
-}
-.slot {
-    background: #2a2a2a;
-    padding: 15px;
-    border-radius: 12px;
-    border: 1px solid #444;
-}
-.modal-overlay {
-    display: none;
-    position: fixed;
-    top: 0; left: 0;
-    width: 100%; height: 100%;
-    background: rgba(0,0,0,0.95);
-    z-index: 1000;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-}
-.points-display { font-size: 2.5rem; color: #FFC107; font-weight: bold; }
-.admin-table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.85rem; }
-.admin-table th, .admin-table td { border: 1px solid #444; padding: 10px; text-align: left; }
-.busy-label { color: #f44336; font-size: 0.7rem; font-weight: bold; margin-top: 5px; display: none; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+:root { --bg: #0d0d0d; --card: #1a1a1a; --green: #43a047; --blue: #1e88e5; --orange: #fbc02d; --error: #ff453a; }
+body { background-color: var(--bg); color: white; font-family: 'Inter', sans-serif; margin: 0; padding: 15px; display: flex; justify-content: center; }
+.main-container { width: 100%; max-width: 400px; text-align: center; }
+.rainbow-animate { background: linear-gradient(45deg, #ff0000, #ff7f00, #ffff00, #00ff00, #0000ff, #4b0082, #8b00ff); background-size: 400% 400%; animation: rainbow-rotate 5s linear infinite; }
+@keyframes rainbow-rotate { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+.logo-circle { width: 90px; height: 90px; background: white; border-radius: 50%; margin: 10px auto; padding: 4px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.logo-circle img { width: 75%; height: 75%; border-radius: 50%; }
+.brand-name { font-weight: 800; font-size: 1.8rem; margin: 0; -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.tagline { color: white; font-size: 0.75rem; margin: 5px 0 20px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; opacity: 0.8; }
+.timer-banner { background: rgba(255, 69, 58, 0.15); border: 1px solid rgba(255, 69, 58, 0.3); color: #ff453a; padding: 10px; border-radius: 12px; font-size: 0.85rem; font-weight: 800; margin-bottom: 15px; display: none; }
+.card { background: var(--card); border-radius: 24px; padding: 22px; margin-bottom: 15px; border: 1px solid #222; }
+.points-display { font-size: 3.2rem; font-weight: 800; color: var(--orange); margin: 5px 0; }
+.btn-insert { background: var(--green); color: white; border: none; padding: 18px; width: 100%; border-radius: 16px; font-weight: 800; cursor: pointer; }
+.btn-redeem { background: var(--blue); color: white; border: none; padding: 12px; width: 100%; border-radius: 10px; font-weight: 700; margin-top: 10px; cursor: pointer; }
+.btn-redeem.busy { background: #333 !important; color: #777; cursor: not-allowed; }
+.admin-row { display: flex; align-items: center; justify-content: space-between; padding: 10px; background: #222; margin-bottom: 8px; border-radius: 12px; border: 1px solid #333; }
+.admin-stats-bar { background: rgba(67,160,71,0.1); border: 1px solid var(--green); border-radius: 12px; padding: 10px; margin-bottom: 15px; font-weight: 800; color: var(--green); }
+.btn-emergency { background: #ff453a; color: white; border: none; padding: 12px; border-radius: 10px; font-weight: 800; width: 100%; margin-top: 10px; cursor: pointer; }
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.95); justify-content: center; align-items: center; z-index: 1000; }
+.modal-content { background: #1a1a1a; width: 320px; border-radius: 30px; padding: 25px; border: 1px solid #333; text-align: center; }
+.admin-login-input { width: 100%; padding: 15px; border-radius: 12px; border: 1px solid #444; background: #000; color: white; text-align: center; font-size: 1.2rem; margin-bottom: 15px; letter-spacing: 4px; box-sizing: border-box; }
