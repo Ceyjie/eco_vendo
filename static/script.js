@@ -85,15 +85,41 @@ function loginAdmin() {
     }
 }
 
+
 function fetchAdmin() {
-    fetch('/api/admin_stats').then(r => r.json()).then(data => {
-        document.getElementById('total-bottles').innerText = data.total_bottles;
-        let html = "";
-        data.users.forEach(u => html += `<div class="admin-row"><span>${u.user_id}</span><b>${u.points}</b></div>`);
-        document.getElementById('admin-list').innerHTML = html;
-    });
+    const pass = document.getElementById('admin-pass-input').value;
+    // We pass the password in the query string
+    fetch(`/api/admin_stats?pass=${pass}`)
+        .then(r => r.json())
+        .then(data => {
+            if(data.error) return alert("Access Denied");
+            
+            document.getElementById('total-bottles').innerText = data.total_bottles;
+            let html = "";
+            
+            // Loop through users and show ID + Points
+            data.users.forEach(u => {
+                html += `
+                <div class="admin-row" style="display:flex; justify-content:space-between; padding:5px; border-bottom:1px solid #444;">
+                    <span style="font-family:monospace; color:#aaa;">${u.user_id}</span>
+                    <b style="color:var(--green);">${u.points} Pts</b>
+                </div>`;
+            });
+            
+            document.getElementById('admin-list').innerHTML = html || "No users yet";
+        });
 }
 
+
+// ... existing updateStatus functions ...
+
 function emergencyReset() {
-    if(confirm("Refresh all pins?")) fetch('/api/emergency_reset').then(() => location.reload());
+    if(confirm("Refresh all pins and stop all timers?")) {
+        fetch('/api/emergency_reset')
+        .then(r => r.json())
+        .then(data => {
+            alert("System Refreshed!");
+            location.reload(); // Refresh the UI immediately
+        });
+    }
 }

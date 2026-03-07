@@ -1,75 +1,64 @@
-import os
+import gpiod
 import time
+import os
+from gpiod.line import Direction, Bias
 
-# --- CONFIG (Direct Kernel IDs for Allwinner H3) ---
-PINS = {
-    "START (PA13)": "13",
-    "SELECT (PA14)": "14",
-    "CONFIRM (PD14)": "110",
-    "IR_BOTTOM (PA6)": "6",
-    "IR_TOP (PA1)": "1",
-    "BUZZER (PA0)": "0"
+# --- CONFIG ---
+PINS_IN = {
+    "START (PA13)": 13,
+    "SELECT (PA14)": 14,
+    "CONFIRM (PD14)": 110,
+    "IR_BOTTOM (PA6)": 6,
+    "IR_TOP (PA1)": 1
 }
+CHIP_PATH = "/dev/gpiochip0"
 
-def reset_all_gpios():
-    """Forcefully releases all pins from the kernel"""
-    print("[1/3] Resetting all GPIO exports...")
-    if os.path.exists("/sys/class/gpio/"):
-        for folder in os.listdir("/sys/class/gpio/"):
-            if folder.startswith("gpio"):
-                pin_num = folder.replace("gpio", "")
-                try:
-                    with open("/sys/class/gpio/unexport", "w") as f:
-                        f.write(pin_num)
-                except:
-                    pass
-    print("      Done.")
-
-def setup_pins():
-    """Exports pins and sets them to input mode"""
-    print("[2/3] Initializing Pins via Sysfs...")
-    for name, pin in PINS.items():
-        try:
-            # Export
-            if not os.path.exists(f"/sys/class/gpio/gpio{pin}"):
-                with open("/sys/class/gpio/export", "w") as f:
-                    f.write(pin)
-            time.sleep(0.1) # Wait for kernel to generate files
-            
-            # Set Direction
-            direction = "out" if "BUZZER" in name else "in"
-            with open(f"/sys/class/gpio/gpio{pin}/direction", "w") as f:
-                f.write(direction)
-            print(f"      {name} [ID {pin}] is Ready.")
-        except Exception as e:
-            print(f"      Error setting up {name}: {e}")
+def cleanup_sysfs():
+    """Releases pins from the old sysfs interface to prevent 'Device Busy' errors"""
+    print("Checking for busy pins...")
+    for name, offset in PINS_IN.items():
+        sysfs_path = f"/sys/class/gpio/gpio{offset}"
+        if os.path.exists(sysfs_path):
+            try:
+                with open("/sys/class/gpio/unexport", "w") as f:
+                    f.write(str(offset))
+                print(f"  Released pin {offset}")
+            except:
+                pass
+    time.sleep(0.2) # Give kernel time to update
 
 def monitor():
-    """Live monitor of pin states"""
-    print("[3/3] MONITORING... (Press Ctrl+C to stop)")
-    print("-" * 50)
-    print("EXPECTED: 1 (Not Pressed), 0 (Pressed/Grounded)")
-    print("-" * 50)
+    cleanup_sysfs()
+    print(f"Connecting to {CHIP_PATH}...")
     
+    offsets = list(PINS_IN.values())
+    names = list(PINS_IN.keys())
+
     try:
-        while True:
-            results = []
-            for name, pin in PINS.items():
-                if "BUZZER" in name: continue
-                try:
-                    with open(f"/sys/class/gpio/gpio{pin}/value", "r") as f:
-                        val = f.read().strip()
-                        results.append(f"{name}: {val}")
-                except:
-                    results.append(f"{name}: ERR")
+        with gpiod.request_lines(
+            CHIP_PATH,
+            consumer="eco-test",
+            config={
+                tuple(offsets): gpiod.LineSettings(
+                    direction=Direction.INPUT,
+                    bias=Bias.PULL_UP
+                )
+            }
+        ) as request:
             
-            # Print on the same line using \r
-            print(" | ".join(results), end="\r")
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        print("\n\nCleaning up and exiting...")
+            print("\nSUCCESS: Monitoring with Internal Pull-ups")
+            print("1 = Idle | 0 = Triggered (GND)")
+            print("-" * 50)
+
+            while True:
+                line_values = request.get_values()
+                results = [f"{names[i]}: {line_values[i].value}" for i in range(len(names))]
+                print(" | ".join(results), end="\r")
+                time.sleep(0.1)
+
+    except Exception as e:
+        print(f"\nError: {e}")
+        print("\nTIP: If still 'Busy', a reboot will force-clear all GPIO claims.")
 
 if __name__ == "__main__":
-    reset_all_gpios()
-    setup_pins()
     monitor()
