@@ -1,120 +1,99 @@
-let currentCount = 0; 
-let userPoints = 0; 
-let currentSlot = 0;
+let currentCount = 0;
 let logoClicks = 0;
-
-// SONG AND SOUND CONFIG
-const bgMusic = new Audio('/static/relaxing.mp3');
+let targetSlot = 0;
 const dropSound = new Audio('/static/bottle_drop.mp3');
-bgMusic.loop = true; 
-bgMusic.volume = 0.3;
-
-// Start music on first click
-document.addEventListener('click', () => { 
-    if (bgMusic.paused) bgMusic.play(); 
-}, { once: true });
 
 function updateStatus() {
     fetch('/api/status').then(r => r.json()).then(data => {
-        let anyBusy = false; 
-        let timerHtml = "";
+        document.querySelector('.points-display').innerText = `${data.points} Points`;
         
-        document.querySelector('.points-display').innerText = data.points + " Points";
-        userPoints = data.points;
-
-        for (let i = 0; i <= 3; i++) {
-            const btn = document.getElementById(`btn-slot-${i}`);
-            const secs = data.slots[i];
-            if (secs > 0) {
-                anyBusy = true; 
-                btn.innerText = "BUSY"; 
-                btn.classList.add('busy'); 
-                btn.onclick = null;
-                timerHtml += `Slot ${i+1}: ${Math.floor(secs/60)}:${(secs%60).toString().padStart(2,'0')} | `;
-            } else {
-                btn.innerText = "Redeem"; 
-                btn.classList.remove('busy'); 
-                btn.onclick = () => openRedeemModal(i);
-            }
+        // Sound Fix: Only play for the active user
+        if (data.is_my_session && data.session > currentCount) {
+            dropSound.currentTime = 0;
+            dropSound.play();
+            currentCount = data.session;
         }
-        const banner = document.getElementById('timer-banner');
-        banner.style.display = anyBusy ? 'block' : 'none';
-        if (anyBusy) banner.innerText = timerHtml.slice(0, -3);
+
+        // Live Count and Timers
+        if (document.getElementById('live-count')) document.getElementById('live-count').innerText = data.session;
+        
+        let timerHtml = "";
+        data.slots.forEach((secs, i) => {
+            const btn = document.getElementById(`btn-slot-${i}`);
+            if (secs > 0) {
+                timerHtml += `S${i+1}: ${Math.floor(secs/60)}m | `;
+                btn.innerHTML = "ADD TIME";
+            } else {
+                btn.innerHTML = "Redeem";
+            }
+        });
+        document.getElementById('timer-banner').innerText = timerHtml;
+        document.getElementById('timer-banner').style.display = timerHtml ? 'block' : 'none';
     });
 }
 setInterval(updateStatus, 1000);
 
 function startSession() {
-    currentCount = 0;
-    document.getElementById('insert-modal').style.display = 'flex';
-    fetch('/api/start_session').then(() => {
-        window.loop = setInterval(() => {
-            fetch('/api/status').then(r => r.json()).then(d => {
-                // Play sound if bottle count increases
-                if (d.session > currentCount) { 
-                    dropSound.currentTime = 0; 
-                    dropSound.play(); 
-                    currentCount = d.session; 
-                }
-                document.getElementById('live-count').innerText = d.session;
-            });
-        }, 500);
+    fetch('/api/start_session').then(r => {
+        if (r.status === 403) alert("Machine Busy!");
+        else document.getElementById('insert-modal').style.display = 'flex';
     });
 }
 
-function stopSession() { 
-    clearInterval(window.loop); 
-    fetch('/api/stop_session').then(() => location.reload()); 
+function stopSession() {
+    fetch('/api/stop_session').then(() => {
+        document.getElementById('insert-modal').style.display = 'none';
+        location.reload();
+    });
 }
 
-function openRedeemModal(id) { currentSlot = id; document.getElementById('redeem-modal').style.display = 'flex'; }
+// Modal Handlers
+function openRedeemModal(slot) {
+    targetSlot = slot;
+    document.getElementById('pts-to-redeem').value = 1;
+    document.getElementById('redeem-modal').style.display = 'flex';
+}
+
 function closeRedeemModal() { document.getElementById('redeem-modal').style.display = 'none'; }
-function adjustPoints(val) { 
-    let i = document.getElementById('pts-to-redeem'); 
-    let c = parseInt(i.value); 
-    if (c + val >= 1) i.value = c + val; 
+
+function adjustPoints(val) {
+    let input = document.getElementById('pts-to-redeem');
+    let currentPts = parseInt(document.querySelector('.points-display').innerText);
+    let nextVal = parseInt(input.value) + val;
+    if (nextVal >= 1 && nextVal <= currentPts) input.value = nextVal;
 }
 
 function confirmRedeem() {
-    const req = parseInt(document.getElementById('pts-to-redeem').value);
-    if (req > userPoints) { alert("Insufficient Points"); return; }
-    location.href = `/redeem/${currentSlot}/${req}`;
+    const pts = document.getElementById('pts-to-redeem').value;
+    window.location.href = `/redeem/${targetSlot}/${pts}`;
 }
 
+// Admin
 function handleLogoClick() {
-    logoClicks++; 
-    if (logoClicks >= 5) { document.getElementById('admin-auth').style.display = 'flex'; logoClicks = 0; }
-    setTimeout(() => logoClicks = 0, 3000);
+    logoClicks++;
+    if (logoClicks >= 5) {
+        document.getElementById('admin-auth').style.display = 'flex';
+        logoClicks = 0;
+    }
 }
 
 function loginAdmin() {
-    if (document.getElementById('admin-pass-input').value === "eco123") {
+    if (document.getElementById('admin-pass-input').value === "1234") {
         document.getElementById('admin-auth').style.display = 'none';
         document.getElementById('admin-panel').style.display = 'flex';
-        refreshAdmin();
-    } else { alert("Access Denied"); }
+        fetchAdmin();
+    }
 }
 
-function refreshAdmin() {
+function fetchAdmin() {
     fetch('/api/admin_stats').then(r => r.json()).then(data => {
         document.getElementById('total-bottles').innerText = data.total_bottles;
-        let html = '';
-        data.users.forEach(u => {
-            html += `<div class="admin-row">
-                <div style="text-align:left;">
-                    <div style="font-size:0.7rem;color:#888;">${u.user_id}</div>
-                    <div style="font-weight:800;color:var(--orange);">${u.points} Pts</div>
-                </div>
-                <div style="display:flex;gap:5px;">
-                    <button style="width:30px;height:30px;background:#444;color:white;border:none;border-radius:5px;" onclick="updateAdminPts('${u.user_id}','sub')">-</button>
-                    <button style="width:30px;height:30px;background:var(--green);color:white;border:none;border-radius:5px;" onclick="updateAdminPts('${u.user_id}','add')">+</button>
-                </div>
-            </div>`;
-        });
+        let html = "";
+        data.users.forEach(u => html += `<div class="admin-row"><span>${u.user_id}</span><b>${u.points}</b></div>`);
         document.getElementById('admin-list').innerHTML = html;
     });
 }
 
-function updateAdminPts(uid, action) { 
-    fetch(`/api/admin_update_points?uid=${uid}&action=${action}`).then(() => refreshAdmin()); 
+function emergencyReset() {
+    if(confirm("Refresh all pins?")) fetch('/api/emergency_reset').then(() => location.reload());
 }

@@ -3,15 +3,16 @@ import time
 
 # --- CONFIG (Direct Kernel IDs for Allwinner H3) ---
 PINS = {
-    "START (PA13)": "13",    # Physical Pin 16
-    "SELECT (PA14)": "14",   # Physical Pin 18
-    "CONFIRM (PG6)": "110",  # Physical Pin 27
-    "IR_BOTTOM (PA6)": "6",  # Physical Pin 15
-    "IR_TOP (PA1)": "1",     # Physical Pin 11
-    "BUZZER (PA0)": "0"      # Physical Pin 13
+    "START (PA13)": "13",
+    "SELECT (PA14)": "14",
+    "CONFIRM (PD14)": "110",
+    "IR_BOTTOM (PA6)": "6",
+    "IR_TOP (PA1)": "1",
+    "BUZZER (PA0)": "0"
 }
 
 def reset_all_gpios():
+    """Forcefully releases all pins from the kernel"""
     print("[1/3] Resetting all GPIO exports...")
     if os.path.exists("/sys/class/gpio/"):
         for folder in os.listdir("/sys/class/gpio/"):
@@ -20,18 +21,22 @@ def reset_all_gpios():
                 try:
                     with open("/sys/class/gpio/unexport", "w") as f:
                         f.write(pin_num)
-                except: pass
+                except:
+                    pass
     print("      Done.")
 
 def setup_pins():
+    """Exports pins and sets them to input mode"""
     print("[2/3] Initializing Pins via Sysfs...")
     for name, pin in PINS.items():
         try:
+            # Export
             if not os.path.exists(f"/sys/class/gpio/gpio{pin}"):
                 with open("/sys/class/gpio/export", "w") as f:
                     f.write(pin)
-            time.sleep(0.2) # Longer wait for kernel stability
-
+            time.sleep(0.1) # Wait for kernel to generate files
+            
+            # Set Direction
             direction = "out" if "BUZZER" in name else "in"
             with open(f"/sys/class/gpio/gpio{pin}/direction", "w") as f:
                 f.write(direction)
@@ -40,11 +45,12 @@ def setup_pins():
             print(f"      Error setting up {name}: {e}")
 
 def monitor():
+    """Live monitor of pin states"""
     print("[3/3] MONITORING... (Press Ctrl+C to stop)")
-    print("-" * 60)
-    print("LOGIC: 0 (No Voltage), 1 (3V-5V Detected/PRESSED)")
-    print("-" * 60)
-
+    print("-" * 50)
+    print("EXPECTED: 1 (Not Pressed), 0 (Pressed/Grounded)")
+    print("-" * 50)
+    
     try:
         while True:
             results = []
@@ -53,17 +59,15 @@ def monitor():
                 try:
                     with open(f"/sys/class/gpio/gpio{pin}/value", "r") as f:
                         val = f.read().strip()
-                        # Visual indicator for easier testing
-                        status = " [PRESSED]" if val == "1" else " [OFF]"
-                        results.append(f"{name.split(' ')[0]}: {val}{status}")
+                        results.append(f"{name}: {val}")
                 except:
-                    results.append(f"{name.split(' ')[0]}: ERR")
-
-            # Print on the same line
+                    results.append(f"{name}: ERR")
+            
+            # Print on the same line using \r
             print(" | ".join(results), end="\r")
             time.sleep(0.1)
     except KeyboardInterrupt:
-        print("\n\nExiting...")
+        print("\n\nCleaning up and exiting...")
 
 if __name__ == "__main__":
     reset_all_gpios()

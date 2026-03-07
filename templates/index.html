@@ -1,52 +1,56 @@
 <!DOCTYPE html>
 <html>
-<head><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"></head>
-<body onload="setPoints({{ points }})">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
 <div class="main-container">
     <div class="logo-circle rainbow-animate" onclick="handleLogoClick()"><img src="{{ url_for('static', filename='logo.png') }}"></div>
     <h1 class="brand-name rainbow-animate">ECO-CHARGE VENDO</h1>
     <div class="tagline">"Powered by rays, Designed for change"</div>
     <div id="timer-banner" class="timer-banner"></div>
+
     <div class="card">
         <div style="font-size:0.6rem; color:#444;">ID: {{ device_id }}</div>
         <div class="points-display">{{ points }} Points</div>
         <button class="btn-insert" onclick="startSession()">+ INSERT BOTTLES</button>
     </div>
+
     <div class="card"><div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
-        <div class="slot-card"><b>Slot 1</b><button id="btn-slot-0" class="btn-redeem">Redeem</button></div>
-        <div class="slot-card"><b>Slot 2</b><button id="btn-slot-1" class="btn-redeem">Redeem</button></div>
-        <div class="slot-card"><b>Slot 3</b><button id="btn-slot-2" class="btn-redeem">Redeem</button></div>
-        <div class="slot-card"><b>AC 220V</b><button id="btn-slot-3" class="btn-redeem">Redeem</button></div>
+        <div class="slot-card"><b>Slot 1</b><button id="btn-slot-0" class="btn-redeem" onclick="openRedeemModal(0)">Redeem</button></div>
+        <div class="slot-card"><b>Slot 2</b><button id="btn-slot-1" class="btn-redeem" onclick="openRedeemModal(1)">Redeem</button></div>
+        <div class="slot-card"><b>Slot 3</b><button id="btn-slot-2" class="btn-redeem" onclick="openRedeemModal(2)">Redeem</button></div>
+        <div class="slot-card"><b>AC 220V</b><button id="btn-slot-3" class="btn-redeem" onclick="openRedeemModal(3)">Redeem</button></div>
     </div></div>
+
     <div class="card"><table style="width:100%; font-size:0.75rem; text-align:left;">
         {% for log in logs %}<tr><td>{{ log[0] }}</td><td style="color:var(--orange);font-weight:700;">{{ log[1] }}</td><td style="text-align:right;opacity:0.5;">{{ log[2] }}</td></tr>{% endfor %}
     </table></div>
 </div>
 
-<div id="admin-auth" class="modal-overlay"><div class="modal-content" style="width:280px;">
-    <h3>SECURITY CHECK</h3><input type="password" id="admin-pass-input" class="admin-login-input" placeholder="••••">
-    <button class="btn-insert" onclick="loginAdmin()">VERIFY</button>
+<div id="insert-modal" class="modal-overlay"><div class="modal-content"><h2>INSERTING...</h2><div id="live-count" style="font-size:5rem;color:var(--green);">0</div><button class="btn-insert" style="background:red;" onclick="stopSession()">DONE</button></div></div>
+
+<div id="redeem-modal" class="modal-overlay"><div class="modal-content">
+    <h3>REDEEM</h3><div style="display:flex; align-items:center; justify-content:center; margin:20px 0;">
+        <button onclick="adjustPoints(-1)" style="width:40px;height:40px;border-radius:50%;background:#333;color:white;">-</button>
+        <input type="number" id="pts-to-redeem" value="1" readonly style="width:80px;background:none;border:none;color:white;font-size:3rem;font-weight:800;text-align:center;">
+        <button onclick="adjustPoints(1)" style="width:40px;height:40px;border-radius:50%;background:#333;color:white;">+</button>
+    </div>
+    <button class="btn-redeem" onclick="confirmRedeem()">CONFIRM</button>
+    <button class="btn-insert" style="margin-top:10px; background:#333;" onclick="closeRedeemModal()">BACK</button>
 </div></div>
 
+<div id="admin-auth" class="modal-overlay"><div class="modal-content"><h3>SECURITY</h3><input type="password" id="admin-pass-input" class="admin-login-input"><button class="btn-insert" onclick="loginAdmin()">VERIFY</button></div></div>
+
 <div id="admin-panel" class="modal-overlay"><div class="modal-content">
-    <h3 style="margin-top:0;">ADMIN DASHBOARD</h3>
-    <div class="admin-stats-bar">TOTAL BOTTLES: <span id="total-bottles">0</span></div>
-    <div id="admin-list" style="max-height:250px; overflow-y:auto; margin-bottom:15px;"></div>
+    <h3>ADMIN</h3>
+    <div class="admin-stats-bar">TOTAL: <span id="total-bottles">0</span></div>
+    <div id="admin-list" style="max-height:200px; overflow-y:auto;"></div>
     <button class="btn-emergency" onclick="emergencyReset()">Emergency Reset</button>
     <button class="btn-insert" style="margin-top:10px; background:#333;" onclick="document.getElementById('admin-panel').style.display='none'">CLOSE</button>
 </div></div>
 
-<div id="redeem-modal" class="modal-overlay"><div class="modal-content">
-    <h3>REDEEM</h3><div style="display:flex; align-items:center; justify-content:center; margin:20px 0;">
-        <button onclick="adjustPoints(-1)" style="width:40px;height:40px;border-radius:50%;background:#333;color:white;border:none;">-</button>
-        <input type="number" id="pts-to-redeem" value="1" readonly style="width:80px;background:none;border:none;color:white;font-size:3rem;font-weight:800;text-align:center;">
-        <button onclick="adjustPoints(1)" style="width:40px;height:40px;border-radius:50%;background:#333;color:white;border:none;">+</button>
-    </div>
-    <button class="btn-redeem" style="padding:15px;" onclick="confirmRedeem()">CONFIRM</button>
-    <button class="btn-insert" style="margin-top:10px; background:#333;" onclick="closeRedeemModal()">BACK</button>
-</div></div>
-
-<div id="insert-modal" class="modal-overlay"><div class="modal-content"><h2>INSERTING...</h2><div id="live-count" style="font-size:5rem;color:var(--green);">0</div><button class="btn-insert" style="background:red;" onclick="stopSession()">DONE</button></div></div>
 <script src="{{ url_for('static', filename='script.js') }}"></script>
-</body></html>
+</body>
+</html>
