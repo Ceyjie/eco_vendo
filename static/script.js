@@ -6,7 +6,7 @@ const dropSound = new Audio('/static/bottle_drop.mp3');
 function updateStatus() {
     fetch('/api/status').then(r => r.json()).then(data => {
         document.querySelector('.points-display').innerText = `${data.points} Points`;
-        
+
         // Sound Fix: Only play for the active user
         if (data.is_my_session && data.session > currentCount) {
             dropSound.currentTime = 0;
@@ -14,34 +14,53 @@ function updateStatus() {
             currentCount = data.session;
         }
 
-        // Live Count and Timers
-        if (document.getElementById('live-count')) document.getElementById('live-count').innerText = data.session;
-        
+        // Live Count
+        if (document.getElementById('live-count')) {
+            document.getElementById('live-count').innerText = data.session;
+        }
+
+        // Timers
         let timerHtml = "";
         data.slots.forEach((secs, i) => {
             const btn = document.getElementById(`btn-slot-${i}`);
             if (secs > 0) {
-                timerHtml += `S${i+1}: ${Math.floor(secs/60)}m | `;
-                btn.innerHTML = "ADD TIME";
+                const mins = Math.floor(secs / 60);
+                const s = secs % 60;
+                timerHtml += `S${i + 1}: ${mins}m ${s}s | `;
+                if (btn) btn.innerHTML = "ADD TIME";
             } else {
-                btn.innerHTML = "Redeem";
+                if (btn) btn.innerHTML = "Redeem";
             }
         });
-        document.getElementById('timer-banner').innerText = timerHtml;
-        document.getElementById('timer-banner').style.display = timerHtml ? 'block' : 'none';
+
+        const banner = document.getElementById('timer-banner');
+        if (banner) {
+            // Remove trailing " | "
+            banner.innerText = timerHtml.replace(/ \| $/, '');
+            banner.style.display = timerHtml ? 'block' : 'none';
+        }
+    }).catch(err => {
+        console.warn("Status fetch failed:", err);
     });
 }
 setInterval(updateStatus, 1000);
 
 function startSession() {
     fetch('/api/start_session').then(r => {
-        if (r.status === 403) alert("Machine Busy!");
-        else document.getElementById('insert-modal').style.display = 'flex';
-    });
+        if (r.status === 403) {
+            alert("Machine Busy! Please wait.");
+        } else {
+            currentCount = 0; // Reset local counter for new session
+            document.getElementById('insert-modal').style.display = 'flex';
+        }
+    }).catch(() => alert("Connection error. Try again."));
 }
 
 function stopSession() {
     fetch('/api/stop_session').then(() => {
+        document.getElementById('insert-modal').style.display = 'none';
+        location.reload();
+    }).catch(() => {
         document.getElementById('insert-modal').style.display = 'none';
         location.reload();
     });
@@ -54,13 +73,18 @@ function openRedeemModal(slot) {
     document.getElementById('redeem-modal').style.display = 'flex';
 }
 
-function closeRedeemModal() { document.getElementById('redeem-modal').style.display = 'none'; }
+function closeRedeemModal() {
+    document.getElementById('redeem-modal').style.display = 'none';
+}
 
 function adjustPoints(val) {
-    let input = document.getElementById('pts-to-redeem');
-    let currentPts = parseInt(document.querySelector('.points-display').innerText);
-    let nextVal = parseInt(input.value) + val;
-    if (nextVal >= 1 && nextVal <= currentPts) input.value = nextVal;
+    const input = document.getElementById('pts-to-redeem');
+    const currentPtsText = document.querySelector('.points-display').innerText;
+    const currentPts = parseInt(currentPtsText);
+    const nextVal = parseInt(input.value) + val;
+    if (nextVal >= 1 && nextVal <= currentPts) {
+        input.value = nextVal;
+    }
 }
 
 function confirmRedeem() {
@@ -78,26 +102,26 @@ function handleLogoClick() {
 }
 
 function loginAdmin() {
-    if (document.getElementById('admin-pass-input').value === "1234") {
+    const pass = document.getElementById('admin-pass-input').value;
+    if (pass === "1234") {
         document.getElementById('admin-auth').style.display = 'none';
         document.getElementById('admin-panel').style.display = 'flex';
         fetchAdmin();
+    } else {
+        alert("Wrong password!");
     }
 }
 
-
 function fetchAdmin() {
     const pass = document.getElementById('admin-pass-input').value;
-    // We pass the password in the query string
     fetch(`/api/admin_stats?pass=${pass}`)
         .then(r => r.json())
         .then(data => {
-            if(data.error) return alert("Access Denied");
-            
+            if (data.error) return alert("Access Denied");
+
             document.getElementById('total-bottles').innerText = data.total_bottles;
             let html = "";
-            
-            // Loop through users and show ID + Points
+
             data.users.forEach(u => {
                 html += `
                 <div class="admin-row" style="display:flex; justify-content:space-between; padding:5px; border-bottom:1px solid #444;">
@@ -105,21 +129,23 @@ function fetchAdmin() {
                     <b style="color:var(--green);">${u.points} Pts</b>
                 </div>`;
             });
-            
+
             document.getElementById('admin-list').innerHTML = html || "No users yet";
-        });
+        })
+        .catch(() => alert("Failed to fetch admin data."));
 }
 
-
-// ... existing updateStatus functions ...
-
 function emergencyReset() {
-    if(confirm("Refresh all pins and stop all timers?")) {
+    if (confirm("Refresh all pins and stop all timers?")) {
         fetch('/api/emergency_reset')
-        .then(r => r.json())
-        .then(data => {
-            alert("System Refreshed!");
-            location.reload(); // Refresh the UI immediately
-        });
+            .then(r => r.json())
+            .then(data => {
+                alert("System Refreshed!");
+                location.reload();
+            })
+            .catch(() => {
+                alert("Reset sent (connection dropped, reloading...)");
+                location.reload();
+            });
     }
 }
