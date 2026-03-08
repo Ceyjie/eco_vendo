@@ -193,6 +193,8 @@ def hardware_loop():
     last_val = {p: 1 for p in btn_pins}
     last_press = {p: 0.0 for p in btn_pins}  # FIXED: per-button debounce
     ir_cooldown = 0
+    ir_last_bot = 1  # Track previous IR state for edge detection
+    ir_last_top = 1
 
     while True:
         now = time.time()
@@ -221,22 +223,27 @@ def hardware_loop():
                     handle_physical_press(p)
             last_val[p] = val
 
-        # --- IR SENSOR ---
-        # Both HIGH (top + bottom) = large bottle = 2 points
-        # Bottom HIGH, top LOW = small bottle = 1 point
+        # --- IR SENSOR: edge detection (must go HIGH then LOW to count) ---
+        # Both LOW = large bottle = 2 points
+        # Bottom LOW, Top HIGH = small bottle = 1 point
         if session_data["state"] == "INSERTING" and now >= ir_cooldown and not admin_data["active"]:
             bot = gpio_read(PIN_IR_BOTTOM)
             top = gpio_read(PIN_IR_TOP)
-            if bot == 1 and top == 1:
+            # Only trigger on falling edge (pin just went LOW from HIGH)
+            bot_triggered = (bot == 0 and ir_last_bot == 1)
+            top_triggered = (top == 0 and ir_last_top == 1)
+            if bot_triggered and top == 0:
                 session_data["count"] += 2
                 session_data["last_activity"] = now
                 beep(2)
                 ir_cooldown = now + 0.6
-            elif bot == 1 and top == 0:
+            elif bot_triggered and top == 1:
                 session_data["count"] += 1
                 session_data["last_activity"] = now
                 beep(1)
                 ir_cooldown = now + 0.6
+            ir_last_bot = bot
+            ir_last_top = top
 
         # --- AUTO TIMEOUT: 60s inactivity (paused during admin) ---
         if not admin_data["active"]:

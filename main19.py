@@ -1,4 +1,4 @@
-import time, threading, os, subprocess, json, uuid
+import time, threading, os, subprocess, json, uuid, signal
 from flask import Flask, jsonify, render_template, request, redirect, url_for, make_response
 from RPLCD.i2c import CharLCD
 
@@ -38,6 +38,8 @@ admin_data = {
     "hold_start": 0,
     "holding": False
 }
+
+# --- GPIO HELPERS ---
 def gpio_setup(pin, direction="in", value="0"):
     path = f"/sys/class/gpio/gpio{pin}"
     if not os.path.exists(path):
@@ -123,6 +125,23 @@ def run_relay_thread(slot):
         slot_status[slot] = max(0, slot_status[slot] - 1)
     gpio_write(PINS_RELAYS[slot], 0)
 
+# --- CLEAN SHUTDOWN ---
+def shutdown(signum=None, frame=None):
+    print("\nShutting down...")
+    for pin in PINS_RELAYS: gpio_write(pin, 0)
+    gpio_write(PIN_BUZZER, 0)
+    try:
+        if lcd:
+            lcd.clear()
+            lcd.backlight_enabled = False
+            lcd.close()
+    except: pass
+    print("All outputs off. Bye.")
+    os._exit(0)
+
+signal.signal(signal.SIGINT,  shutdown)
+signal.signal(signal.SIGTERM, shutdown)
+
 # --- HARDWARE BUTTON HANDLERS ---
 def handle_physical_press(pin):
     session_data["last_activity"] = time.time()
@@ -131,22 +150,18 @@ def handle_physical_press(pin):
     # --- ADMIN MODE ACTIONS ---
     if admin_data["active"]:
         if pin == PIN_BTN_SELECT:
-            # Scroll to next user
             db = load_db()
             users = list(db["users"].items())
             if users:
                 admin_data["user_index"] = (admin_data["user_index"] + 1) % len(users)
             beep(1)
         elif pin == PIN_BTN_START:
-            # Reset system
             system_refresh()
-            beep(3)
         elif pin == PIN_BTN_CONFIRM:
-            # Exit admin, return to IDLE
             admin_data["active"] = False
             session_data.update({"state": "IDLE", "count": 0, "active_user": None})
             beep(2)
-        return  # Don't fall through to normal handlers
+        return
 
     # --- NORMAL MODE ACTIONS ---
     if pin == PIN_BTN_START and s == "IDLE":
@@ -190,62 +205,76 @@ def finalize_transaction():
 # --- BACKGROUND LOOPS ---
 def hardware_loop():
     btn_pins = [PIN_BTN_START, PIN_BTN_SELECT, PIN_BTN_CONFIRM]
-    last_val = {p: 1 for p in btn_pins}
-    last_press = {p: 0.0 for p in btn_pins}  # FIXED: per-button debounce
+    last_val  = {p: 1 for p in btn_pins}
+    last_press = {p: 0.0 for p in btn_pins}
     ir_cooldown = 0
+    ir_last_bot = 1
+    ir_last_top = 1
 
     while True:
         now = time.time()
 
-        # --- ADMIN ENTRY: hold START + SELECT together for 2 seconds ---
-        start_held = gpio_read(PIN_BTN_START) == 0
+        # Read both hold buttons first
+        start_held  = gpio_read(PIN_BTN_START)  == 0
         select_held = gpio_read(PIN_BTN_SELECT) == 0
-        if start_held and select_held:
+        both_held   = start_held and select_held
+
+        # --- ADMIN ENTRY: hold START + SELECT for 2 seconds ---
+        if both_held:
             if not admin_data["holding"]:
                 admin_data["holding"] = True
                 admin_data["hold_start"] = now
-            elif (now - admin_data["hold_start"]) >= 2.0 and not admin_data["active"]:
+            elif (now - admin_data["hold_start"]) >= 10.0 and not admin_data["active"]:
                 admin_data["active"] = True
                 admin_data["user_index"] = 0
                 admin_data["holding"] = False
+                # Reset last_val so buttons don't fire on release
+                for p in btn_pins:
+                    last_val[p] = 0
                 beep(3)
         else:
             admin_data["holding"] = False
 
-        # --- BUTTONS: per-button debounce ---
-        for p in btn_pins:
-            val = gpio_read(p)
-            if val == 0 and last_val[p] == 1:
-                if (now - last_press[p]) > 0.3:
-                    last_press[p] = now
-                    handle_physical_press(p)
-            last_val[p] = val
+        # --- BUTTONS: only process when NOT holding both for admin ---
+        if not both_held:
+            for p in btn_pins:
+                val = gpio_read(p)
+                if val == 0 and last_val[p] == 1:
+                    if (now - last_press[p]) > 0.3:
+                        last_press[p] = now
+                        handle_physical_press(p)
+                last_val[p] = val
+        else:
+            # Keep last_val=0 during hold — no edges detected on release
+            for p in btn_pins:
+                last_val[p]   = 0
+                last_press[p] = now
 
-        # --- IR SENSOR ---
-        # Both HIGH (top + bottom) = large bottle = 2 points
-        # Bottom HIGH, top LOW = small bottle = 1 point
+        # --- IR SENSOR: edge detection ---
         if session_data["state"] == "INSERTING" and now >= ir_cooldown and not admin_data["active"]:
             bot = gpio_read(PIN_IR_BOTTOM)
             top = gpio_read(PIN_IR_TOP)
-            if bot == 1 and top == 1:
+            bot_triggered = (bot == 0 and ir_last_bot == 1)
+            if bot_triggered and top == 0:
                 session_data["count"] += 2
                 session_data["last_activity"] = now
                 beep(2)
                 ir_cooldown = now + 0.6
-            elif bot == 1 and top == 0:
+            elif bot_triggered and top == 1:
                 session_data["count"] += 1
                 session_data["last_activity"] = now
                 beep(1)
                 ir_cooldown = now + 0.6
+            ir_last_bot = bot
+            ir_last_top = top
 
-        # --- AUTO TIMEOUT: 60s inactivity (paused during admin) ---
+        # --- AUTO TIMEOUT: 20s inactivity ---
         if not admin_data["active"]:
             if session_data["state"] not in ["IDLE", "THANK_YOU"]:
                 if (now - session_data["last_activity"]) > 20:
                     session_data.update({"state": "IDLE", "count": 0, "active_user": None})
                     beep(3)
         else:
-            # Keep last_activity fresh so session doesn't timeout while in admin
             session_data["last_activity"] = now
 
         time.sleep(0.01)
@@ -267,14 +296,14 @@ def display_manager():
                     "  ** ADMIN MODE **  ",
                     f"ID:{uid[:12]}",
                     f"PTS:{pts}  {idx+1}/{len(users)}",
-                    "B1:RST B2:NEXT B3:EXIT"
+                    "B1:RST B2:NXT B3:EXIT"
                 ])
             else:
                 lcd_write([
                     "  ** ADMIN MODE **  ",
-                    f" TOTAL: {total} bottles",
+                    f" TOTAL:{total} bottles",
                     "   No users yet",
-                    "B1:RST        B3:EXIT"
+                    "B1:RST       B3:EXIT"
                 ])
             time.sleep(0.2)
             continue
