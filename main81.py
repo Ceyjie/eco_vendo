@@ -28,6 +28,8 @@ WEIGHT_SMALL_MIN  =  9
 WEIGHT_SMALL_MAX  = 16
 WEIGHT_NATURE_MIN = 16
 WEIGHT_NATURE_MAX = 19
+WEIGHT_COKE1L_MIN = 22
+WEIGHT_COKE1L_MAX = 28
 WEIGHT_BIG_MIN    = 29
 WEIGHT_BIG_MAX    = 39
 
@@ -292,6 +294,8 @@ def classify_bottle(weight_g):
         return 1, "SMALL",  "  SMALL BOTTLE      ", "     +1 POINT!      "
     elif WEIGHT_NATURE_MIN <= weight_g <= WEIGHT_NATURE_MAX:
         return 2, "NATURE", "  NATURE SPRING     ", "     +2 POINTS!     "
+    elif WEIGHT_COKE1L_MIN <= weight_g <= WEIGHT_COKE1L_MAX:
+        return 2, "COKE1L", "  COKE/ROYAL 1L     ", "     +2 POINTS!     "
     elif WEIGHT_BIG_MIN <= weight_g <= WEIGHT_BIG_MAX:
         return 2, "BIG",    "  BIG BOTTLE        ", "     +2 POINTS!     "
     else:
@@ -703,6 +707,7 @@ def redeem(slot, pts):
 # STARTUP
 # ═══════════════════════════════════════════════════════════
 if __name__ == '__main__':
+    time.sleep(3)
     subprocess.run(["sudo", "fuser", "-k", "80/tcp"], capture_output=True)
 
     gpio_setup(PIN_BUZZER, "out", "0"); gpio_write(PIN_BUZZER, 0)

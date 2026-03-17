@@ -4,7 +4,7 @@ After=network.target eco-loadcell.service
 Requires=eco-loadcell.service
 
 [Service]
-ExecStart=/usr/bin/python3 /home/eco/eco_vendo/main69.py
+ExecStart=/usr/bin/python3 /home/eco/eco_vendo/main81.py
 WorkingDirectory=/home/eco/eco_vendo
 Restart=always
 RestartSec=5
