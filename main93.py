@@ -21,32 +21,33 @@ DB_FILE           = "eco_database.json"
 ADMIN_PASSWORD    = "1234"
 
 # ═══════════════════════════════════════════════════════════
-# BOTTLE WEIGHT RANGES
+# BOTTLE WEIGHT RANGES (from main81)
 # ═══════════════════════════════════════════════════════════
 WEIGHT_MIN_VALID  =  8
 WEIGHT_SMALL_MIN  =  9
 WEIGHT_SMALL_MAX  = 16
 WEIGHT_NATURE_MIN = 16
 WEIGHT_NATURE_MAX = 19
-WEIGHT_COKE1L_MIN = 22
-WEIGHT_COKE1L_MAX = 28
+WEIGHT_COKE1L_MIN = 22  # Added from main81
+WEIGHT_COKE1L_MAX = 28  # Added from main81
 WEIGHT_BIG_MIN    = 29
 WEIGHT_BIG_MAX    = 39
 
 # ═══════════════════════════════════════════════════════════
-# SERVO — direct pulsing, no thread/queue
+# SERVO (keeping main59's working implementation)
 # ═══════════════════════════════════════════════════════════
-import mmap, struct
+import mmap, struct, queue
 
-PULSE_MIN_MS = 0.5
-PULSE_MAX_MS = 2.5
-PERIOD_MS    = 20.0
-PA_BASE      = 0x01C20800
-PA_DAT_OFF   = 0x10
-PA10_BIT     = (1 << 10)
-_servo_mem   = None
-_servo_sysfs = False
-
+PULSE_MIN_MS   = 0.5
+PULSE_MAX_MS   = 2.5
+PERIOD_MS      = 20.0
+PA_BASE        = 0x01C20800
+PA_DAT_OFF     = 0x10
+PA10_BIT       = (1 << 10)
+_servo_mem     = None
+_servo_sysfs   = False
+_servo_queue   = queue.Queue(maxsize=1)
+servo_active   = True
 
 def servo_init():
     global _servo_mem, _servo_sysfs
@@ -57,7 +58,7 @@ def servo_init():
                                offset=PA_BASE & ~0xFFF)
         os.close(fd)
         _servo_sysfs = False
-        print("Servo: /dev/mem OK")
+        print("Servo: /dev/mem (high accuracy)")
     except Exception as e:
         _servo_sysfs = True
         print(f"Servo: sysfs fallback ({e})")
@@ -85,25 +86,46 @@ def servo_set_pin(val):
                 f.write("1" if val else "0")
         except: pass
 
-def servo_goto(deg, pulses=80):
-    """Send PWM pulses directly — guaranteed to move every call."""
-    deg      = max(0, min(180, deg))
-    pulse_ms = PULSE_MIN_MS + (deg / 180.0) * (PULSE_MAX_MS - PULSE_MIN_MS)
+def servo_send_pulse(pulse_ms):
     pulse_s  = pulse_ms / 1000.0
     period_s = PERIOD_MS / 1000.0
-    for _ in range(pulses):
-        t0 = time.perf_counter()
-        servo_set_pin(1)
-        while (time.perf_counter() - t0) < pulse_s: pass
-        servo_set_pin(0)
-        while (time.perf_counter() - t0) < period_s: pass
+    t0 = time.perf_counter()
+    servo_set_pin(1)
+    while (time.perf_counter() - t0) < pulse_s: pass
     servo_set_pin(0)
+    while (time.perf_counter() - t0) < period_s: pass
 
-def servo_move(deg, pulses=80):
-    """Run servo_goto in its own thread — non-blocking."""
-    t = threading.Thread(target=servo_goto, args=(deg, pulses), daemon=True)
-    t.start()
-    return t
+def servo_pwm_thread():
+    pulse_ms    = PULSE_MIN_MS + (90 / 180.0) * (PULSE_MAX_MS - PULSE_MIN_MS)
+    pulse_count = 0
+    MAX_PULSES  = 60   # ~1.2s to fully reach position then stop
+
+    while servo_active:
+        try:
+            pulse_ms    = _servo_queue.get_nowait()
+            pulse_count = 0
+        except queue.Empty:
+            pass
+
+        if pulse_count < MAX_PULSES:
+            servo_send_pulse(pulse_ms)
+            pulse_count += 1
+        else:
+            servo_set_pin(0)   # pin LOW — no jitter
+            time.sleep(0.02)
+
+def servo_goto(deg, hold=0.6):
+    deg      = max(0, min(180, deg))
+    pulse_ms = PULSE_MIN_MS + (deg / 180.0) * (PULSE_MAX_MS - PULSE_MIN_MS)
+    try: _servo_queue.get_nowait()
+    except queue.Empty: pass
+    _servo_queue.put(pulse_ms)
+    if hold > 0:
+        time.sleep(hold)
+
+def servo_move(deg, hold=0.6):
+    """Non-blocking servo movement"""
+    threading.Thread(target=servo_goto, args=(deg, hold), daemon=True).start()
 
 # ═══════════════════════════════════════════════════════════
 # SYSTEM STATE
@@ -117,14 +139,14 @@ session_data = {
     "last_activity": time.time(),
     "last_bottle_msg": ""
 }
-slot_status = {0: 0, 1: 0, 2: 0, 3: 0}
-admin_data  = {"active": False, "user_index": 0, "hold_start": 0, "holding": False}
-bottle_lock = threading.Lock()
-lcd_lock    = threading.Lock()
-_ir_reset   = False
+slot_status  = {0: 0, 1: 0, 2: 0, 3: 0}
+admin_data   = {"active": False, "user_index": 0, "hold_start": 0, "holding": False}
+bottle_lock  = threading.Lock()
+lcd_lock     = threading.Lock()
+_ir_reset    = False
 
 # ═══════════════════════════════════════════════════════════
-# DATABASE
+# DATABASE (with main81's error handling)
 # ═══════════════════════════════════════════════════════════
 def load_db():
     try:
@@ -146,7 +168,7 @@ def save_db(data):
     with open(DB_FILE, 'w') as f: json.dump(data, f)
 
 # ═══════════════════════════════════════════════════════════
-# GPIO — sysfs (buttons, relays, buzzer)
+# GPIO (with main81's cleanup)
 # ═══════════════════════════════════════════════════════════
 def gpio_setup(pin, direction="in", value="0"):
     path = f"/sys/class/gpio/gpio{pin}"
@@ -182,7 +204,7 @@ def beep_now(times=1):
         gpio_write(PIN_BUZZER, 0); time.sleep(0.04)
 
 # ═══════════════════════════════════════════════════════════
-# IR — gpiod with PULL_UP (no ghost triggers)
+# IR — gpiod with PULL_UP (from main81)
 # ═══════════════════════════════════════════════════════════
 _ir_request = None
 
@@ -222,7 +244,7 @@ def ir_read_both():
     return gpio_read(PIN_IR_BOTTOM), gpio_read(PIN_IR_TOP)
 
 # ═══════════════════════════════════════════════════════════
-# LCD
+# LCD (with main81's error handling)
 # ═══════════════════════════════════════════════════════════
 lcd = None
 current_lcd_lines = ["", "", "", ""]
@@ -232,33 +254,42 @@ def init_lcd():
     for addr in [0x27, 0x3f]:
         try:
             lcd = CharLCD('PCF8574', addr, port=0, cols=20, rows=4, charmap='A00')
-            lcd.clear(); return
+            lcd.clear()
+            return
         except: lcd = None
 
 def _lcd_write_raw(new_lines):
     global current_lcd_lines, lcd
-    if not lcd: init_lcd(); return
+    if not lcd:
+        init_lcd()
+        return
     try:
-        safe = []
+        safe_lines = []
         for line in new_lines:
-            c = ""
+            cleaned = ""
             for ch in str(line):
-                c += ch if (ch.isascii() and ch not in ('%','\n','\r','\x00')) else ' '
-            safe.append(c.ljust(20)[:20])
-        for i, line in enumerate(safe):
+                if ch.isascii() and ch not in ('%', '\n', '\r', '\x00'):
+                    cleaned += ch
+                else:
+                    cleaned += ' '
+            safe_lines.append(cleaned.ljust(20)[:20])
+        for i, line in enumerate(safe_lines):
             if line != current_lcd_lines[i]:
                 lcd.cursor_pos = (i, 0)
                 lcd.write_string(line)
                 current_lcd_lines[i] = line
     except Exception as e:
         print(f"LCD error: {e}")
-        lcd = None; current_lcd_lines = ["","","",""]; init_lcd()
+        lcd = None
+        current_lcd_lines = ["", "", "", ""]
+        init_lcd()
 
 def lcd_write(new_lines):
+    if lcd_lock.locked(): return
     with lcd_lock:
         _lcd_write_raw(new_lines)
 
-def lcd_write(new_lines):
+def lcd_write_force(new_lines):
     _lcd_write_raw(new_lines)
 
 def format_time(seconds):
@@ -267,34 +298,39 @@ def format_time(seconds):
     return f"{m:02d}:{s:02d}" if m < 60 else f"{m//60:02d}:{m%60:02d}"
 
 # ═══════════════════════════════════════════════════════════
-# HX711
+# HX711 — reads from loadcell.py via shared file
 # ═══════════════════════════════════════════════════════════
 WEIGHT_FILE = "/tmp/eco_weight.json"
 
 def hx_get_grams():
     try:
-        with open(WEIGHT_FILE, "r") as f: data = json.load(f)
-        if time.time() - data.get("ts", 0) > 1.0: return None
+        with open(WEIGHT_FILE, "r") as f:
+            data = json.load(f)
+        if time.time() - data.get("ts", 0) > 1.0:
+            return None
         return data.get("grams", 0.0)
-    except: return None
+    except:
+        return None
 
 def hx_is_ready():
     try:
-        with open(WEIGHT_FILE, "r") as f: data = json.load(f)
+        with open(WEIGHT_FILE, "r") as f:
+            data = json.load(f)
         return time.time() - data.get("ts", 0) < 2.0
-    except: return False
+    except:
+        return False
 
 # ═══════════════════════════════════════════════════════════
-# BOTTLE CLASSIFICATION
+# BOTTLE CLASSIFICATION (with main81's COKE1L range)
 # ═══════════════════════════════════════════════════════════
 def classify_bottle(weight_g):
     if weight_g < WEIGHT_MIN_VALID:
-        return 0, None,     "   NOT A BOTTLE!    ", "   Bottles only!    "
+        return 0, None, "   NOT A BOTTLE!    ", "   Bottles only!    "
     elif WEIGHT_SMALL_MIN <= weight_g <= WEIGHT_SMALL_MAX:
         return 1, "SMALL",  "  SMALL BOTTLE      ", "     +1 POINT!      "
     elif WEIGHT_NATURE_MIN <= weight_g <= WEIGHT_NATURE_MAX:
         return 2, "NATURE", "  NATURE SPRING     ", "     +2 POINTS!     "
-    elif WEIGHT_COKE1L_MIN <= weight_g <= WEIGHT_COKE1L_MAX:
+    elif WEIGHT_COKE1L_MIN <= weight_g <= WEIGHT_COKE1L_MAX:  # Added from main81
         return 2, "COKE1L", "  COKE/ROYAL 1L     ", "     +2 POINTS!     "
     elif WEIGHT_BIG_MIN <= weight_g <= WEIGHT_BIG_MAX:
         return 2, "BIG",    "  BIG BOTTLE        ", "     +2 POINTS!     "
@@ -302,36 +338,38 @@ def classify_bottle(weight_g):
         return 0, None,     "  INVALID BOTTLE!   ", f"  {weight_g:.0f}g not accepted  "[:20]
 
 # ═══════════════════════════════════════════════════════════
-# BOTTLE PROCESSING
+# BOTTLE PROCESSING (with main81's LCD messages)
 # ═══════════════════════════════════════════════════════════
 def process_bottle():
     with bottle_lock:
-        _process_bottle_inner()
+        with lcd_lock:
+            _process_bottle_inner()
 
 def _process_bottle_inner():
     global _ir_reset
+    servo_goto(90, hold=0.3)
 
-    lcd_write(["    BOTTLE SENSED   ", "    Checking...     ",
+    lcd_write_force(["    BOTTLE SENSED   ", "    Checking...     ",
                      "  Place on sensor   ", "  Hold still...     "])
     time.sleep(0.5)
 
-    # Pre-check: confirm real weight within 2s
+    # Pre-check: abort if no real weight within 2s
     pre_check = False
     for _ in range(10):
         w = hx_get_grams()
         if w is not None and w > WEIGHT_MIN_VALID:
-            pre_check = True; break
+            pre_check = True
+            break
         time.sleep(0.2)
 
     if not pre_check:
-        lcd_write(["   NO BOTTLE        ", "   DETECTED!        ",
+        lcd_write_force(["   NO BOTTLE        ", "   DETECTED!        ",
                          "  Place bottle on   ", "  sensor and retry  "])
-        beep_now(3); time.sleep(2)
-        _ir_reset = True; return
+        beep_now(3); time.sleep(2); return
 
-    # Weigh over 5s
-    samples = []
+    samples    = []
     start_time = time.time()
+
     while time.time() - start_time < 5.0:
         if hx_is_ready():
             w = hx_get_grams()
@@ -339,44 +377,39 @@ def _process_bottle_inner():
                 samples.append(w)
         if samples:
             avg = sum(samples) / len(samples)
-            lcd_write(["    WEIGHING...     ",
+            lcd_write_force(["    WEIGHING...     ",
                              f"    {avg:6.1f} g       "[:20],
                              f"  Reading {len(samples)} of 5   "[:20],
                              "  Hold still...     "])
         if len(samples) >= 5:
             s = sorted(samples[-5:])
-            if s[-1] - s[0] <= 5.0: break
+            if s[-1] - s[0] <= 5.0:
+                break
         time.sleep(0.4)
 
     if len(samples) < 3:
-        lcd_write(["   NO BOTTLE        ", "   DETECTED!        ",
+        servo_goto(90, hold=0)
+        lcd_write_force(["   NO BOTTLE        ", "   DETECTED!        ",
                          "  Place bottle on   ", "  sensor and retry  "])
-        beep_now(3); time.sleep(2)
-        _ir_reset = True; return
+        beep_now(3); time.sleep(2); return
 
     final    = sorted(samples[-5:]) if len(samples) >= 5 else sorted(samples)
     weight   = final[len(final) // 2]
     variance = final[-1] - final[0]
 
     if variance > 5.0:
-        lcd_write(["   HOLD STILL!      ", "  Keep bottle firm  ",
+        servo_goto(90, hold=0)
+        lcd_write_force(["   HOLD STILL!      ", "  Keep bottle firm  ",
                          "  on the sensor     ", "  Try again...      "])
-        time.sleep(2)
-        _ir_reset = True; return
+        time.sleep(2); return
 
     pts, label, line1, line2 = classify_bottle(weight)
-    print(f"Bottle: {weight:.1f}g  pts={pts}  label={label}")
+    print(f"Bottle: {weight:.1f}g pts={pts} label={label}")
 
     if pts > 0:
-        lcd_write(["    ACCEPTED!       ", line1, line2, "   Processing...    "])
+        lcd_write_force(["    ACCEPTED!       ", line1, line2, "   Processing...    "])
         time.sleep(0.5)
-
-        lcd_write(["    PUSHING OUT     ", line1, "  Please wait...    ", "                    "])
-        servo_goto(0)     # push bottle out — blocks for ~1.6s
-        time.sleep(2.0)   # hold at 0° for 2 seconds
-
-        lcd_write(["  REMOVING BOTTLE   ", "  Please remove it  ", "  from the slot...  ", "                    "])
-        servo_goto(90)    # return to standby — blocks for ~1.6s
+        servo_goto(0, hold=1.0)
 
         session_data["count"]          += pts
         session_data["last_activity"]   = time.time()
@@ -388,22 +421,38 @@ def _process_bottle_inner():
         db["logs"].append([time.strftime("%H:%M"), f"+{pts} Pts", label or "Bottle"])
         save_db(db)
 
+        lcd_write_force(["  REMOVING BOTTLE   ", "  Please wait...    ",
+                         "                    ", "                    "])
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            w = hx_get_grams()
+            if w is not None and w < WEIGHT_MIN_VALID:
+                break
+            time.sleep(0.2)
+
+        servo_goto(90, hold=1.5)   # longer hold so servo fully reaches 90°
+
         total = session_data["count"]
-        lcd_write([line1, line2,
-                   f"  Total: {total} pts        "[:20],
-                   "  Keep recycling!   "])
+        lcd_write_force([line1, line2,
+                         f"  Total: {total} pts        "[:20],
+                         "  Keep recycling!   "])
         time.sleep(2)
 
         cnt = session_data['count']
-        lcd_write(["   INSERT BOTTLE    ",
-                   f"   Bottles: {cnt}        "[:20],
-                   f"   Time: {cnt*5}m         "[:20],
-                   "   B3: Confirm      "])
-    else:
-        lcd_write(["   INVALID ITEM!    ", line1, line2, "   Try again...     "])
-        beep_now(3); time.sleep(2)
+        lcd_write_force(["   INSERT BOTTLE    ",
+                         f"   Bottles: {cnt}        "[:20],
+                         f"   Time: {cnt*5}m         "[:20],
+                         "   B3: Confirm      "])
 
-    _ir_reset = True
+        # Reset IR after bottle done — prevents ghost trigger on next loop
+        _ir_reset = True
+
+    else:
+        servo_goto(90, hold=0)
+        lcd_write_force(["   INVALID ITEM!    ", line1, line2, "   Try again...     "])
+        beep_now(3); time.sleep(2)
+        # Reset IR after invalid item too
+        _ir_reset = True
 
 # ═══════════════════════════════════════════════════════════
 # RELAY
@@ -422,13 +471,15 @@ def run_relay_thread(slot):
     gpio_write(PINS_RELAYS[slot], 0)
 
 # ═══════════════════════════════════════════════════════════
-# SHUTDOWN
+# SHUTDOWN (with servo_active from main81)
 # ═══════════════════════════════════════════════════════════
 def shutdown(signum=None, frame=None):
+    global servo_active
     print("\nShutting down...")
+    servo_active = False
     for pin in PINS_RELAYS: gpio_write(pin, 0)
     gpio_write(PIN_BUZZER, 0)
-    servo_set_pin(0)
+    gpio_write(PIN_SERVO,  0)
     if _ir_request:
         try: _ir_request.release()
         except: pass
@@ -450,7 +501,8 @@ def handle_physical_press(pin):
 
     if admin_data["active"]:
         if pin == PIN_BTN_SELECT:
-            db = load_db(); users = list(db["users"].items())
+            db = load_db()
+            users = list(db["users"].items())
             if users: admin_data["user_index"] = (admin_data["user_index"] + 1) % len(users)
             beep(1)
         elif pin == PIN_BTN_START: system_refresh()
@@ -461,10 +513,11 @@ def handle_physical_press(pin):
         return
 
     if pin == PIN_BTN_START and s == "IDLE":
-        beep(1); _ir_reset = True
+        beep(1)
+        _ir_reset = True   # ← force IR re-sync on next hardware_loop cycle
         session_data.update({"state": "INSERTING", "count": 0, "active_user": "LOCAL_USER"})
     elif pin == PIN_BTN_SELECT:
-        if s == "SELECTING":        beep(1); session_data["selected_slot"] = (session_data["selected_slot"] + 1) % 4
+        if s == "SELECTING":   beep(1); session_data["selected_slot"] = (session_data["selected_slot"] + 1) % 4
         elif s == "ADD_TIME_PROMPT": beep(1); session_data["add_time_choice"] = 1 - session_data["add_time_choice"]
     elif pin == PIN_BTN_CONFIRM:
         if s == "INSERTING":
@@ -488,18 +541,21 @@ def finalize_transaction():
     threading.Timer(4.0, lambda: session_data.update({"state": "IDLE", "count": 0, "active_user": None})).start()
 
 # ═══════════════════════════════════════════════════════════
-# HARDWARE LOOP
+# HARDWARE LOOP (with main81's IR reset improvements)
 # ═══════════════════════════════════════════════════════════
 def hardware_loop():
     global _ir_reset
-    btn_pins     = [PIN_BTN_START, PIN_BTN_SELECT, PIN_BTN_CONFIRM]
-    last_val     = {p: 1   for p in btn_pins}
-    last_press   = {p: 0.0 for p in btn_pins}
-    ir_cooldown  = 0
-    ir_bot_count = 0
-    ir_top_count = 0
+    btn_pins   = [PIN_BTN_START, PIN_BTN_SELECT, PIN_BTN_CONFIRM]
+    last_val   = {p: 1   for p in btn_pins}
+    last_press = {p: 0.0 for p in btn_pins}
+    ir_cooldown   = 0
+    ir_last_bot   = 1
+    ir_last_top   = 1
+    ir_bot_count  = 0   # consecutive LOW count for debounce
+    ir_top_count  = 0
 
-    time.sleep(2.0)  # settle after boot
+    # Wait for GPIO to fully settle after boot before reading IR
+    time.sleep(2.0)
 
     while True:
         now = time.time()
@@ -528,19 +584,25 @@ def hardware_loop():
         else:
             for p in btn_pins: last_val[p] = 0; last_press[p] = now
 
-        # IR reset on new session
+        # IR ghost fix — re-read current state when entering INSERTING
         if _ir_reset:
+            ir_last_bot  = gpio_read(PIN_IR_BOTTOM)
+            ir_last_top  = gpio_read(PIN_IR_TOP)
             ir_bot_count = 0
             ir_top_count = 0
-            ir_cooldown  = now + 1.0
+            ir_cooldown  = now + 1.0  # 1s grace period
             _ir_reset    = False
 
-        # IR — gpiod pull-up, 3 consecutive LOW to trigger
+        # Both IR active LOW — require 3 consecutive LOW readings to confirm real trigger
         if session_data["state"] == "INSERTING" and now >= ir_cooldown \
                 and not admin_data["active"] and not bottle_lock.locked():
-            bot, top = ir_read_both()
+            bot, top = ir_read_both()  # Use gpiod if available
+
+            # Count consecutive LOW readings
             ir_bot_count = (ir_bot_count + 1) if bot == 0 else 0
             ir_top_count = (ir_top_count + 1) if top == 0 else 0
+
+            # Trigger only after 3 consecutive LOW readings (~30ms)
             if ir_bot_count >= 3 or ir_top_count >= 3:
                 session_data["last_activity"] = now
                 ir_cooldown  = now + 6.0
@@ -549,7 +611,10 @@ def hardware_loop():
                 beep_now(1)
                 threading.Thread(target=process_bottle, daemon=True).start()
 
-        # Auto timeout 30s
+            ir_last_bot = bot
+            ir_last_top = top
+
+        # Auto timeout 30s — pauses if bottle on sensor
         if not admin_data["active"]:
             if session_data["state"] == "INSERTING":
                 w = hx_get_grams()
@@ -570,12 +635,14 @@ def hardware_loop():
         time.sleep(0.01)
 
 # ═══════════════════════════════════════════════════════════
-# DISPLAY MANAGER
+# DISPLAY MANAGER (with main81's RAYCHARGE branding)
 # ═══════════════════════════════════════════════════════════
 def display_manager():
     last_lines = []
     while True:
-        if lcd_lock.locked(): time.sleep(0.05); continue
+        if lcd_lock.locked():
+            time.sleep(0.05); continue
+
         s = session_data["state"]
 
         if admin_data["active"]:
@@ -588,7 +655,7 @@ def display_manager():
         elif s == "IDLE":
             t1 = f"U1:{format_time(slot_status[0])} U2:{format_time(slot_status[1])}"
             t2 = f"U3:{format_time(slot_status[2])} AC:{format_time(slot_status[3])}"
-            lines = ["     RAYCHARGE      ", "     PRESS START    ", t1, t2]
+            lines = ["      RAYCHARGE    ", "     PRESS START    ", t1, t2]  # RAYCHARGE branding
         elif s == "INSERTING":
             cnt = session_data['count']
             lines = ["   INSERT BOTTLE    ",
@@ -610,40 +677,34 @@ def display_manager():
 
         if lines != last_lines:
             lcd_write(lines); last_lines = lines[:]
+
         time.sleep(0.05)
 
 # ═══════════════════════════════════════════════════════════
-# FLASK
+# FLASK (with main81's features)
 # ═══════════════════════════════════════════════════════════
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 
 @app.route('/static/<path:filename>')
-def serve_static(filename): return send_from_directory('static', filename)
+def serve_static(filename):
+    return send_from_directory('static', filename)
 
 def get_user_id():
     uid = request.cookies.get('user_uuid')
     if not uid: uid = request.remote_addr
     db = load_db()
     if uid not in db["users"]:
-        db["users"][uid] = {"points": 0}
-        save_db(db)
+        db["users"][uid] = {"points": 0}; save_db(db)
     return uid
 
 @app.route('/')
 def index():
-    db = load_db()
-    uid = request.cookies.get('user_uuid')
-    is_new_user = False
-    if not uid:
-        uid = str(uuid.uuid4())[:8]
-        is_new_user = True
-    if uid not in db["users"]:
-        db["users"][uid] = {"points": 0}
-        save_db(db)
+    db = load_db(); uid = request.cookies.get('user_uuid'); is_new_user = False
+    if not uid: uid = str(uuid.uuid4())[:8]; is_new_user = True
+    if uid not in db["users"]: db["users"][uid] = {"points": 0}; save_db(db)
     resp = make_response(render_template('index.html', device_id=uid,
-                         points=db["users"][uid]["points"], logs=db["logs"][-5:]))
-    if is_new_user:
-        resp.set_cookie('user_uuid', uid, max_age=31536000)
+                           points=db["users"][uid]["points"], logs=db["logs"][-5:]))
+    if is_new_user: resp.set_cookie('user_uuid', uid, max_age=31536000)
     return resp
 
 @app.route('/api/status')
@@ -659,9 +720,9 @@ def web_start():
     global _ir_reset
     uid = get_user_id()
     if session_data["state"] == "IDLE":
-        _ir_reset = True
+        _ir_reset = True   # ← reset IR on web start too
         session_data.update({"state": "INSERTING", "count": 0,
-                             "active_user": uid, "last_activity": time.time()})
+                              "active_user": uid, "last_activity": time.time()})
         return jsonify({"status": "ok"})
     return jsonify({"status": "busy"}), 403
 
@@ -678,7 +739,8 @@ def web_stop():
     return jsonify({"status": "unauthorized"}), 401
 
 @app.route('/api/emergency_reset')
-def admin_reset(): system_refresh(); return jsonify({"status": "system_refreshed"})
+def admin_reset():
+    system_refresh(); return jsonify({"status": "system_refreshed"})
 
 def system_refresh():
     for i in range(4): slot_status[i] = 0
@@ -699,30 +761,35 @@ def redeem(slot, pts):
     if db["users"][uid]["points"] >= pts:
         db["users"][uid]["points"] -= pts
         db["logs"].append([time.strftime("%H:%M"), f"-{pts} Pts", SLOT_NAMES[slot]]); save_db(db)
-        start_or_extend_relay(slot, pts * 300); beep(2)
+        start_or_extend_relay(slot, pts * 300)
+        beep(2)
     return redirect(url_for('index'))
 
 # ═══════════════════════════════════════════════════════════
-# STARTUP
+# STARTUP (with main81's enhancements)
 # ═══════════════════════════════════════════════════════════
 if __name__ == '__main__':
+    time.sleep(3)  # Added from main81
     subprocess.run(["sudo", "fuser", "-k", "80/tcp"], capture_output=True)
-
+    
     gpio_setup(PIN_BUZZER, "out", "0"); gpio_write(PIN_BUZZER, 0)
+    gpio_setup(PIN_SERVO,  "out", "0"); gpio_write(PIN_SERVO,  0)
     for p in PINS_RELAYS: gpio_setup(p, "out", "0"); gpio_write(p, 0)
 
     init_lcd()
-    lcd_write(["     RAYCHARGE      ","   Initializing...  ", "                    ", "                    "])
+    lcd_write(["     RAYCHARGE      ", "   Initializing...  ", "                    ", "                    "])  # RAYCHARGE branding
 
-    ir_init()
+    ir_init()  # Using main81's improved IR init
 
-    for p in [PIN_BTN_START, PIN_BTN_SELECT, PIN_BTN_CONFIRM]:
+    for p in [PIN_IR_BOTTOM, PIN_IR_TOP, PIN_BTN_START, PIN_BTN_SELECT, PIN_BTN_CONFIRM]:
         gpio_setup(p, "in")
 
+    time.sleep(0.5)
     servo_init()
-    servo_goto(90)   # go to standby on boot
+    threading.Thread(target=servo_pwm_thread, daemon=True).start()
+    servo_goto(90, hold=0.5)
 
-    lcd_write(["     RAYCHARGE      ","    PRESS START     ", "                    ", "                    "])
+    lcd_write(["     RAYCHARGE      ", "    PRESS START     ", "                    ", "                    "])  # RAYCHARGE branding
 
     threading.Thread(target=hardware_loop,   daemon=True).start()
     threading.Thread(target=display_manager, daemon=True).start()

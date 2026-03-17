@@ -34,19 +34,20 @@ WEIGHT_BIG_MIN    = 29
 WEIGHT_BIG_MAX    = 39
 
 # ═══════════════════════════════════════════════════════════
-# SERVO — direct pulsing, no thread/queue
+# SERVO — THREADED WITH QUEUE (like main59)
 # ═══════════════════════════════════════════════════════════
-import mmap, struct
+import mmap, struct, queue
 
-PULSE_MIN_MS = 0.5
-PULSE_MAX_MS = 2.5
-PERIOD_MS    = 20.0
-PA_BASE      = 0x01C20800
-PA_DAT_OFF   = 0x10
-PA10_BIT     = (1 << 10)
-_servo_mem   = None
-_servo_sysfs = False
-
+PULSE_MIN_MS   = 0.5
+PULSE_MAX_MS   = 2.5
+PERIOD_MS      = 20.0
+PA_BASE        = 0x01C20800
+PA_DAT_OFF     = 0x10
+PA10_BIT       = (1 << 10)
+_servo_mem     = None
+_servo_sysfs   = False
+_servo_queue   = queue.Queue(maxsize=1)
+servo_active   = True
 
 def servo_init():
     global _servo_mem, _servo_sysfs
@@ -85,25 +86,46 @@ def servo_set_pin(val):
                 f.write("1" if val else "0")
         except: pass
 
-def servo_goto(deg, pulses=80):
-    """Send PWM pulses directly — guaranteed to move every call."""
-    deg      = max(0, min(180, deg))
-    pulse_ms = PULSE_MIN_MS + (deg / 180.0) * (PULSE_MAX_MS - PULSE_MIN_MS)
+def servo_send_pulse(pulse_ms):
     pulse_s  = pulse_ms / 1000.0
     period_s = PERIOD_MS / 1000.0
-    for _ in range(pulses):
-        t0 = time.perf_counter()
-        servo_set_pin(1)
-        while (time.perf_counter() - t0) < pulse_s: pass
-        servo_set_pin(0)
-        while (time.perf_counter() - t0) < period_s: pass
+    t0 = time.perf_counter()
+    servo_set_pin(1)
+    while (time.perf_counter() - t0) < pulse_s: pass
     servo_set_pin(0)
+    while (time.perf_counter() - t0) < period_s: pass
 
-def servo_move(deg, pulses=80):
-    """Run servo_goto in its own thread — non-blocking."""
-    t = threading.Thread(target=servo_goto, args=(deg, pulses), daemon=True)
-    t.start()
-    return t
+def servo_pwm_thread():
+    pulse_ms    = PULSE_MIN_MS + (90 / 180.0) * (PULSE_MAX_MS - PULSE_MIN_MS)
+    pulse_count = 0
+    MAX_PULSES  = 60   # ~1.2s to fully reach position then stop
+
+    while servo_active:
+        try:
+            pulse_ms    = _servo_queue.get_nowait()
+            pulse_count = 0
+        except queue.Empty:
+            pass
+
+        if pulse_count < MAX_PULSES:
+            servo_send_pulse(pulse_ms)
+            pulse_count += 1
+        else:
+            servo_set_pin(0)   # pin LOW — no jitter
+            time.sleep(0.02)
+
+def servo_goto(deg, hold=0.6):
+    deg      = max(0, min(180, deg))
+    pulse_ms = PULSE_MIN_MS + (deg / 180.0) * (PULSE_MAX_MS - PULSE_MIN_MS)
+    try: _servo_queue.get_nowait()
+    except queue.Empty: pass
+    _servo_queue.put(pulse_ms)
+    if hold > 0:
+        time.sleep(hold)
+
+def servo_move(deg, hold=0.6):
+    """Non-blocking servo movement"""
+    threading.Thread(target=servo_goto, args=(deg, hold), daemon=True).start()
 
 # ═══════════════════════════════════════════════════════════
 # SYSTEM STATE
@@ -182,12 +204,13 @@ def beep_now(times=1):
         gpio_write(PIN_BUZZER, 0); time.sleep(0.04)
 
 # ═══════════════════════════════════════════════════════════
-# IR — gpiod with PULL_UP (no ghost triggers)
+# IR — gpiod with PULL_UP (fixed)
 # ═══════════════════════════════════════════════════════════
 _ir_request = None
 
 def ir_init():
     global _ir_request
+    # Clean up any existing sysfs entries
     for pin in [PIN_IR_BOTTOM, PIN_IR_TOP]:
         sysfs = f"/sys/class/gpio/gpio{pin}"
         if os.path.exists(sysfs):
@@ -195,6 +218,8 @@ def ir_init():
                 with open("/sys/class/gpio/unexport", "w") as f: f.write(pin)
             except: pass
     time.sleep(0.3)
+    
+    # Try gpiod first
     try:
         _ir_request = gpiod.request_lines(
             CHIP_PATH,
@@ -202,7 +227,7 @@ def ir_init():
             config={
                 (PIN_IR_BOTTOM_OFF, PIN_IR_TOP_OFF): gpiod.LineSettings(
                     direction=Direction.INPUT,
-                    bias=Bias.PULL_UP
+                    bias=Bias.PULL_UP  # CRITICAL: prevents floating inputs
                 )
             }
         )
@@ -210,6 +235,7 @@ def ir_init():
     except Exception as e:
         print(f"IR gpiod failed ({e}), using sysfs")
         _ir_request = None
+        # Fallback to sysfs
         for pin in [PIN_IR_BOTTOM, PIN_IR_TOP]:
             gpio_setup(pin, "in")
 
@@ -222,7 +248,7 @@ def ir_read_both():
     return gpio_read(PIN_IR_BOTTOM), gpio_read(PIN_IR_TOP)
 
 # ═══════════════════════════════════════════════════════════
-# LCD
+# LCD (with better error handling)
 # ═══════════════════════════════════════════════════════════
 lcd = None
 current_lcd_lines = ["", "", "", ""]
@@ -232,12 +258,20 @@ def init_lcd():
     for addr in [0x27, 0x3f]:
         try:
             lcd = CharLCD('PCF8574', addr, port=0, cols=20, rows=4, charmap='A00')
-            lcd.clear(); return
-        except: lcd = None
+            lcd.clear()
+            time.sleep(0.1)
+            return
+        except Exception as e:
+            print(f"LCD init error at {hex(addr)}: {e}")
+            lcd = None
+    print("WARNING: No LCD found")
 
 def _lcd_write_raw(new_lines):
     global current_lcd_lines, lcd
-    if not lcd: init_lcd(); return
+    if not lcd:
+        init_lcd()
+        if not lcd:  # Still no LCD after init attempt
+            return
     try:
         safe = []
         for line in new_lines:
@@ -252,14 +286,17 @@ def _lcd_write_raw(new_lines):
                 current_lcd_lines[i] = line
     except Exception as e:
         print(f"LCD error: {e}")
-        lcd = None; current_lcd_lines = ["","","",""]; init_lcd()
+        lcd = None
+        current_lcd_lines = ["", "", "", ""]
 
 def lcd_write(new_lines):
+    if lcd_lock.locked(): return
     with lcd_lock:
         _lcd_write_raw(new_lines)
 
-def lcd_write(new_lines):
-    _lcd_write_raw(new_lines)
+def lcd_write_force(new_lines):
+    with lcd_lock:
+        _lcd_write_raw(new_lines)
 
 def format_time(seconds):
     seconds = max(0, seconds)
@@ -302,16 +339,17 @@ def classify_bottle(weight_g):
         return 0, None,     "  INVALID BOTTLE!   ", f"  {weight_g:.0f}g not accepted  "[:20]
 
 # ═══════════════════════════════════════════════════════════
-# BOTTLE PROCESSING
+# BOTTLE PROCESSING (FIXED - non-blocking servo)
 # ═══════════════════════════════════════════════════════════
 def process_bottle():
     with bottle_lock:
-        _process_bottle_inner()
+        with lcd_lock:
+            _process_bottle_inner()
 
 def _process_bottle_inner():
     global _ir_reset
 
-    lcd_write(["    BOTTLE SENSED   ", "    Checking...     ",
+    lcd_write_force(["    BOTTLE SENSED   ", "    Checking...     ",
                      "  Place on sensor   ", "  Hold still...     "])
     time.sleep(0.5)
 
@@ -324,10 +362,12 @@ def _process_bottle_inner():
         time.sleep(0.2)
 
     if not pre_check:
-        lcd_write(["   NO BOTTLE        ", "   DETECTED!        ",
+        lcd_write_force(["   NO BOTTLE        ", "   DETECTED!        ",
                          "  Place bottle on   ", "  sensor and retry  "])
-        beep_now(3); time.sleep(2)
-        _ir_reset = True; return
+        beep_now(3)
+        time.sleep(2)
+        _ir_reset = True
+        return
 
     # Weigh over 5s
     samples = []
@@ -339,7 +379,7 @@ def _process_bottle_inner():
                 samples.append(w)
         if samples:
             avg = sum(samples) / len(samples)
-            lcd_write(["    WEIGHING...     ",
+            lcd_write_force(["    WEIGHING...     ",
                              f"    {avg:6.1f} g       "[:20],
                              f"  Reading {len(samples)} of 5   "[:20],
                              "  Hold still...     "])
@@ -349,34 +389,33 @@ def _process_bottle_inner():
         time.sleep(0.4)
 
     if len(samples) < 3:
-        lcd_write(["   NO BOTTLE        ", "   DETECTED!        ",
+        lcd_write_force(["   NO BOTTLE        ", "   DETECTED!        ",
                          "  Place bottle on   ", "  sensor and retry  "])
-        beep_now(3); time.sleep(2)
-        _ir_reset = True; return
+        beep_now(3)
+        time.sleep(2)
+        _ir_reset = True
+        return
 
     final    = sorted(samples[-5:]) if len(samples) >= 5 else sorted(samples)
     weight   = final[len(final) // 2]
     variance = final[-1] - final[0]
 
     if variance > 5.0:
-        lcd_write(["   HOLD STILL!      ", "  Keep bottle firm  ",
+        lcd_write_force(["   HOLD STILL!      ", "  Keep bottle firm  ",
                          "  on the sensor     ", "  Try again...      "])
         time.sleep(2)
-        _ir_reset = True; return
+        _ir_reset = True
+        return
 
     pts, label, line1, line2 = classify_bottle(weight)
     print(f"Bottle: {weight:.1f}g  pts={pts}  label={label}")
 
     if pts > 0:
-        lcd_write(["    ACCEPTED!       ", line1, line2, "   Processing...    "])
+        lcd_write_force(["    ACCEPTED!       ", line1, line2, "   Processing...    "])
         time.sleep(0.5)
 
-        lcd_write(["    PUSHING OUT     ", line1, "  Please wait...    ", "                    "])
-        servo_goto(0)     # push bottle out — blocks for ~1.6s
-        time.sleep(2.0)   # hold at 0° for 2 seconds
-
-        lcd_write(["  REMOVING BOTTLE   ", "  Please remove it  ", "  from the slot...  ", "                    "])
-        servo_goto(90)    # return to standby — blocks for ~1.6s
+        # FIXED: Non-blocking servo movement
+        servo_goto(0, hold=1.5)  # This blocks but only for 1.5s, not the full cycle
 
         session_data["count"]          += pts
         session_data["last_activity"]   = time.time()
@@ -388,20 +427,34 @@ def _process_bottle_inner():
         db["logs"].append([time.strftime("%H:%M"), f"+{pts} Pts", label or "Bottle"])
         save_db(db)
 
+        # Wait for bottle removal (non-blocking check)
+        lcd_write_force(["  REMOVING BOTTLE   ", "  Please wait...    ",
+                         "                    ", "                    "])
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            w = hx_get_grams()
+            if w is not None and w < WEIGHT_MIN_VALID:
+                break
+            time.sleep(0.2)
+
+        # Return servo to home position (non-blocking)
+        servo_goto(90, hold=1.5)
+
         total = session_data["count"]
-        lcd_write([line1, line2,
-                   f"  Total: {total} pts        "[:20],
-                   "  Keep recycling!   "])
+        lcd_write_force([line1, line2,
+                         f"  Total: {total} pts        "[:20],
+                         "  Keep recycling!   "])
         time.sleep(2)
 
         cnt = session_data['count']
-        lcd_write(["   INSERT BOTTLE    ",
-                   f"   Bottles: {cnt}        "[:20],
-                   f"   Time: {cnt*5}m         "[:20],
-                   "   B3: Confirm      "])
+        lcd_write_force(["   INSERT BOTTLE    ",
+                         f"   Bottles: {cnt}        "[:20],
+                         f"   Time: {cnt*5}m         "[:20],
+                         "   B3: Confirm      "])
     else:
-        lcd_write(["   INVALID ITEM!    ", line1, line2, "   Try again...     "])
-        beep_now(3); time.sleep(2)
+        lcd_write_force(["   INVALID ITEM!    ", line1, line2, "   Try again...     "])
+        beep_now(3)
+        time.sleep(2)
 
     _ir_reset = True
 
@@ -425,10 +478,12 @@ def run_relay_thread(slot):
 # SHUTDOWN
 # ═══════════════════════════════════════════════════════════
 def shutdown(signum=None, frame=None):
+    global servo_active
     print("\nShutting down...")
+    servo_active = False
     for pin in PINS_RELAYS: gpio_write(pin, 0)
     gpio_write(PIN_BUZZER, 0)
-    servo_set_pin(0)
+    gpio_write(PIN_SERVO, 0)
     if _ir_request:
         try: _ir_request.release()
         except: pass
@@ -459,7 +514,6 @@ def handle_physical_press(pin):
             session_data.update({"state": "IDLE", "count": 0, "active_user": None})
             beep(2)
         return
-
     if pin == PIN_BTN_START and s == "IDLE":
         beep(1); _ir_reset = True
         session_data.update({"state": "INSERTING", "count": 0, "active_user": "LOCAL_USER"})
@@ -498,6 +552,8 @@ def hardware_loop():
     ir_cooldown  = 0
     ir_bot_count = 0
     ir_top_count = 0
+    ir_last_bot  = 1
+    ir_last_top  = 1
 
     time.sleep(2.0)  # settle after boot
 
@@ -530,6 +586,8 @@ def hardware_loop():
 
         # IR reset on new session
         if _ir_reset:
+            ir_last_bot  = gpio_read(PIN_IR_BOTTOM)
+            ir_last_top  = gpio_read(PIN_IR_TOP)
             ir_bot_count = 0
             ir_top_count = 0
             ir_cooldown  = now + 1.0
@@ -548,6 +606,8 @@ def hardware_loop():
                 ir_top_count = 0
                 beep_now(1)
                 threading.Thread(target=process_bottle, daemon=True).start()
+            ir_last_bot = bot
+            ir_last_top = top
 
         # Auto timeout 30s
         if not admin_data["active"]:
@@ -588,7 +648,7 @@ def display_manager():
         elif s == "IDLE":
             t1 = f"U1:{format_time(slot_status[0])} U2:{format_time(slot_status[1])}"
             t2 = f"U3:{format_time(slot_status[2])} AC:{format_time(slot_status[3])}"
-            lines = ["     RAYCHARGE      ", "     PRESS START    ", t1, t2]
+            lines = ["      RAYCHARGE    ", "     PRESS START    ", t1, t2]
         elif s == "INSERTING":
             cnt = session_data['count']
             lines = ["   INSERT BOTTLE    ",
@@ -706,13 +766,14 @@ def redeem(slot, pts):
 # STARTUP
 # ═══════════════════════════════════════════════════════════
 if __name__ == '__main__':
+    time.sleep(3)
     subprocess.run(["sudo", "fuser", "-k", "80/tcp"], capture_output=True)
 
     gpio_setup(PIN_BUZZER, "out", "0"); gpio_write(PIN_BUZZER, 0)
     for p in PINS_RELAYS: gpio_setup(p, "out", "0"); gpio_write(p, 0)
 
     init_lcd()
-    lcd_write(["     RAYCHARGE      ","   Initializing...  ", "                    ", "                    "])
+    lcd_write(["     RAYCHARGE      ", "   Initializing...  ", "                    ", "                    "])
 
     ir_init()
 
@@ -720,9 +781,10 @@ if __name__ == '__main__':
         gpio_setup(p, "in")
 
     servo_init()
-    servo_goto(90)   # go to standby on boot
+    threading.Thread(target=servo_pwm_thread, daemon=True).start()
+    servo_goto(90, hold=0.5)   # go to standby on boot
 
-    lcd_write(["     RAYCHARGE      ","    PRESS START     ", "                    ", "                    "])
+    lcd_write(["     RAYCHARGE      ", "    PRESS START     ", "                    ", "                    "])
 
     threading.Thread(target=hardware_loop,   daemon=True).start()
     threading.Thread(target=display_manager, daemon=True).start()

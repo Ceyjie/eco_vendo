@@ -1,0 +1,11 @@
+[Unit]
+Description=ECO Vendo Startup Sequence
+Before=eco-loadcell.service eco-main.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/eco/eco_vendo/startup.sh
+User=root
+
+[Install]
+WantedBy=multi-user.target
