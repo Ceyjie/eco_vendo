@@ -221,6 +221,7 @@ def ir_read_both():
 # ═══════════════════════════════════════════════════════════
 # LCD
 # ═══════════════════════════════════════════════════════════
+
 lcd = None
 current_lcd_lines = ["", "", "", ""]
 
@@ -585,7 +586,7 @@ def display_manager():
         elif s == "IDLE":
             t1 = f"U1:{format_time(slot_status[0])} U2:{format_time(slot_status[1])}"
             t2 = f"U3:{format_time(slot_status[2])} AC:{format_time(slot_status[3])}"
-            lines = ["      ECO VENDO     ", "     PRESS START    ", t1, t2]
+            lines = ["       RAYCHARGE    ", "     PRESS START    ", t1, t2]
         elif s == "INSERTING":
             cnt = session_data['count']
             lines = ["   INSERT BOTTLE    ",
@@ -709,7 +710,7 @@ if __name__ == '__main__':
     for p in PINS_RELAYS: gpio_setup(p, "out", "0"); gpio_write(p, 0)
 
     init_lcd()
-    lcd_write(["  ECO-CHARGE VENDO  ", "   Initializing...  ", "                    ", "                    "])
+    lcd_write(["     RAYCHARGE      ", "   Initializing...  ", "                    ", "                    "])
 
     ir_init()
 
@@ -719,7 +720,7 @@ if __name__ == '__main__':
     servo_init()
     servo_goto(90)   # go to standby on boot
 
-    lcd_write(["  ECO-CHARGE VENDO  ", "    PRESS START     ", "                    ", "                    "])
+    lcd_write(["     RAYCHARGE      ", "    PRESS START     ", "                    ", "                    "])
 
     threading.Thread(target=hardware_loop,   daemon=True).start()
     threading.Thread(target=display_manager, daemon=True).start()
