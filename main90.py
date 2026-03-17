@@ -457,6 +457,7 @@ def handle_physical_press(pin):
             session_data.update({"state": "IDLE", "count": 0, "active_user": None})
             beep(2)
         return
+
     if pin == PIN_BTN_START and s == "IDLE":
         beep(1); _ir_reset = True
         session_data.update({"state": "INSERTING", "count": 0, "active_user": "LOCAL_USER"})
@@ -585,7 +586,7 @@ def display_manager():
         elif s == "IDLE":
             t1 = f"U1:{format_time(slot_status[0])} U2:{format_time(slot_status[1])}"
             t2 = f"U3:{format_time(slot_status[2])} AC:{format_time(slot_status[3])}"
-            lines = ["      RAYCHARGE    ", "     PRESS START    ", t1, t2]
+            lines = ["       RAYCHARGE    ", "     PRESS START    ", t1, t2]
         elif s == "INSERTING":
             cnt = session_data['count']
             lines = ["   INSERT BOTTLE    ",

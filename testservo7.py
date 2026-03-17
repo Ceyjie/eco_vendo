@@ -159,4 +159,4 @@ def set_servo():
 if __name__ == "__main__":
     gpio_setup()
     threading.Thread(target=servo_worker, daemon=True).start()
-    app.run(host='0.0.0.0', port=80, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=False)
