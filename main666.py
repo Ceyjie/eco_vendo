@@ -1,4 +1,5 @@
 import time, threading, os, subprocess, json, uuid, signal
+import mmap, struct, queue
 from flask import Flask, jsonify, render_template, request, redirect, url_for, make_response, send_from_directory
 from RPLCD.i2c import CharLCD
 
@@ -30,8 +31,6 @@ WEIGHT_BIG_MAX    = 39
 # ═══════════════════════════════════════════════════════════
 # SERVO
 # ═══════════════════════════════════════════════════════════
-import mmap, struct, queue
-
 PULSE_MIN_MS   = 0.5
 PULSE_MAX_MS   = 2.5
 PERIOD_MS      = 20.0
@@ -118,13 +117,18 @@ session_data = {
     "add_time_choice": 1,
     "last_activity": time.time(),
     "last_bottle_msg": "",
-    "bottle_result": "error",       # "accepted" | "rejected" | "error"
-    "bottle_result_choice": 0       # 0 = YES (insert another), 1 = NO (done)
+    "bottle_result": "error",
+    "bottle_result_choice": 0
 }
 slot_status = {0: 0, 1: 0, 2: 0, 3: 0}
 admin_data  = {"active": False, "user_index": 0, "hold_start": 0, "holding": False}
 bottle_lock = threading.Lock()
 lcd_lock    = threading.Lock()
+
+def is_web_session():
+    """Returns True if the current session was started from the web UI."""
+    u = session_data.get("active_user")
+    return u is not None and u != "LOCAL_USER"
 
 # ═══════════════════════════════════════════════════════════
 # DATABASE
@@ -138,9 +142,45 @@ def save_db(data):
     with open(DB_FILE, 'w') as f: json.dump(data, f)
 
 # ═══════════════════════════════════════════════════════════
-# GPIO
+# GPIO — Allwinner H3 pull-up support (Orange Pi One)
 # ═══════════════════════════════════════════════════════════
-def gpio_setup(pin, direction="in", value="0"):
+H3_PULL_MAP = {
+    # sysfs_pin : (PUL_register_address, bit_shift)
+    "0":  (0x01C2081C,  0),   # PA0
+    "1":  (0x01C2081C,  2),   # PA1
+    "2":  (0x01C2081C,  4),   # PA2
+    "3":  (0x01C2081C,  6),   # PA3
+    "6":  (0x01C2081C, 12),   # PA6
+    "10": (0x01C2081C, 20),   # PA10
+    "13": (0x01C2081C, 26),   # PA13
+    "14": (0x01C2081C, 28),   # PA14
+    "21": (0x01C20820, 10),   # PA21 → PUL1
+    "67": (0x01C20864,  6),   # PC3
+    "110":(0x01C20888, 28),   # PD14
+}
+
+def _gpio_set_pull(pin, mode="up"):
+    if pin not in H3_PULL_MAP:
+        print(f"Pull: no H3 map for pin {pin}, skipped")
+        return
+    reg_addr, bit_shift = H3_PULL_MAP[pin]
+    val = 0b01 if mode == "up" else (0b10 if mode == "down" else 0b00)
+    try:
+        fd  = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+        mem = mmap.mmap(fd, 4096, mmap.MAP_SHARED,
+                        mmap.PROT_READ | mmap.PROT_WRITE,
+                        offset=reg_addr & ~0xFFF)
+        os.close(fd)
+        off = reg_addr & 0xFFF
+        cur = struct.unpack_from("<I", mem, off)[0]
+        cur = (cur & ~(0b11 << bit_shift)) | (val << bit_shift)
+        struct.pack_into("<I", mem, off, cur)
+        mem.close()
+        print(f"  pull-{mode} OK  pin={pin}  reg=0x{reg_addr:08X}  bit={bit_shift}")
+    except Exception as e:
+        print(f"  pull FAILED pin={pin}: {e}")
+
+def gpio_setup(pin, direction="in", value="0", pull=None):
     path = f"/sys/class/gpio/gpio{pin}"
     if not os.path.exists(path):
         try:
@@ -150,15 +190,20 @@ def gpio_setup(pin, direction="in", value="0"):
     with open(f"{path}/direction", "w") as f: f.write(direction)
     if direction == "out":
         with open(f"{path}/value", "w") as f: f.write(value)
+    if pull and direction == "in":
+        _gpio_set_pull(pin, pull)
 
 def gpio_read(pin):
     try:
-        with open(f"/sys/class/gpio/gpio{pin}/value", "r") as f: return int(f.read().strip())
-    except: return 1
+        with open(f"/sys/class/gpio/gpio{pin}/value", "r") as f:
+            return int(f.read().strip())
+    except:
+        return 1
 
 def gpio_write(pin, val):
     try:
-        with open(f"/sys/class/gpio/gpio{pin}/value", "w") as f: f.write(str(val))
+        with open(f"/sys/class/gpio/gpio{pin}/value", "w") as f:
+            f.write(str(val))
     except: pass
 
 def beep(times=1):
@@ -174,10 +219,17 @@ def beep_now(times=1):
         gpio_write(PIN_BUZZER, 0); time.sleep(0.04)
 
 # ═══════════════════════════════════════════════════════════
-# LCD
+# LCD  — fast direct writer, no busy-wait on lock
 # ═══════════════════════════════════════════════════════════
 lcd = None
 current_lcd_lines = ["", "", "", ""]
+
+# Pending lines that display_manager wants to show.
+# _lcd_pending is written by display_manager and consumed by the
+# dedicated lcd_writer_thread — this decouples display logic from
+# the I2C write latency completely.
+_lcd_pending      = None
+_lcd_pending_lock = threading.Lock()
 
 def init_lcd():
     global lcd
@@ -185,14 +237,18 @@ def init_lcd():
         try:
             lcd = CharLCD('PCF8574', addr, port=0, cols=20, rows=4, charmap='A00')
             lcd.clear()
+            print(f"LCD found at 0x{addr:02X}")
             return
-        except: lcd = None
+        except:
+            lcd = None
 
 def _lcd_write_raw(new_lines):
+    """Write lines directly to LCD, skipping unchanged lines."""
     global current_lcd_lines, lcd
     if not lcd:
         init_lcd()
-        return
+        if not lcd:
+            return
     try:
         safe_lines = []
         for line in new_lines:
@@ -212,14 +268,46 @@ def _lcd_write_raw(new_lines):
         print(f"LCD error: {e}")
         lcd = None
         current_lcd_lines = ["", "", "", ""]
+        time.sleep(0.5)
         init_lcd()
 
+def lcd_writer_thread():
+    """
+    Dedicated thread that owns the I2C bus.
+    display_manager posts desired lines to _lcd_pending;
+    this thread picks them up and writes immediately.
+    lcd_write_force bypasses the queue and writes directly
+    (called only from bottle_lock context where display_manager
+    is already blocked by lcd_lock).
+    """
+    global _lcd_pending
+    while True:
+        lines = None
+        with _lcd_pending_lock:
+            if _lcd_pending is not None:
+                lines = _lcd_pending
+                _lcd_pending = None
+        if lines is not None:
+            with lcd_lock:
+                _lcd_write_raw(lines)
+        time.sleep(0.01)   # 10 ms — fast enough, doesn't hammer I2C
+
 def lcd_write(new_lines):
-    if lcd_lock.locked(): return
-    with lcd_lock:
-        _lcd_write_raw(new_lines)
+    """Non-blocking post to lcd_writer_thread."""
+    global _lcd_pending
+    with _lcd_pending_lock:
+        _lcd_pending = new_lines   # overwrite — always show the latest
 
 def lcd_write_force(new_lines):
+    """
+    Direct synchronous write used inside bottle processing
+    (already holds lcd_lock via process_bottle).
+    Also clears any pending post so the writer thread
+    doesn't overwrite us right after.
+    """
+    global _lcd_pending
+    with _lcd_pending_lock:
+        _lcd_pending = None
     _lcd_write_raw(new_lines)
 
 def format_time(seconds):
@@ -269,13 +357,12 @@ def classify_bottle(weight_g):
         return 0, None,     "  INVALID BOTTLE!   ", f"  {weight_g:.0f}g not accepted  "[:20]
 
 # ═══════════════════════════════════════════════════════════
-# BOTTLE RESULT PROMPT HELPER
+# BOTTLE RESULT HELPER
 # ═══════════════════════════════════════════════════════════
 def set_bottle_result(result_type):
-    """Transition to BOTTLE_RESULT state after any bottle outcome."""
-    session_data["state"]               = "BOTTLE_RESULT"
-    session_data["bottle_result"]       = result_type   # "accepted" | "rejected" | "error"
-    session_data["bottle_result_choice"] = 0            # default cursor on YES
+    session_data["state"]                = "BOTTLE_RESULT"
+    session_data["bottle_result"]        = result_type
+    session_data["bottle_result_choice"] = 0
 
 # ═══════════════════════════════════════════════════════════
 # BOTTLE PROCESSING
@@ -288,12 +375,10 @@ def process_bottle():
 def _process_bottle_inner():
     servo_goto(90, hold=0.3)
 
-    # First check — confirm something is actually on the sensor
     lcd_write_force(["    BOTTLE SENSED   ", "    Checking...     ",
                      "  Place on sensor   ", "  Hold still...     "])
     time.sleep(0.5)
 
-    # Quick pre-check: if no weight detected within 2s, abort
     pre_check = False
     for _ in range(10):
         w = hx_get_grams()
@@ -379,13 +464,6 @@ def _process_bottle_inner():
             time.sleep(0.2)
 
         servo_goto(90, hold=0.5)
-
-        total = session_data["count"]
-        lcd_write_force([line1, line2,
-                         f"  Total: {total} pts        "[:20],
-                         "  Keep recycling!   "])
-        time.sleep(2)
-
         set_bottle_result("accepted")
 
     else:
@@ -436,19 +514,28 @@ def handle_physical_press(pin):
     session_data["last_activity"] = time.time()
     s = session_data["state"]
 
+    # ── Admin mode overrides everything ────────────────────
     if admin_data["active"]:
         if pin == PIN_BTN_SELECT:
             db = load_db()
             users = list(db["users"].items())
             if users: admin_data["user_index"] = (admin_data["user_index"] + 1) % len(users)
             beep(1)
-        elif pin == PIN_BTN_START: system_refresh()
+        elif pin == PIN_BTN_START:
+            system_refresh()
         elif pin == PIN_BTN_CONFIRM:
             admin_data["active"] = False
             session_data.update({"state": "IDLE", "count": 0, "active_user": None})
             beep(2)
         return
 
+    # ── Web session: buttons are READ-ONLY ─────────────────
+    # Physical buttons do nothing when a web user owns the session.
+    # The LCD still shows current state (insert bottle / points).
+    if is_web_session():
+        return
+
+    # ── Physical session buttons ───────────────────────────
     if pin == PIN_BTN_START and s == "IDLE":
         beep(1)
         session_data.update({"state": "INSERTING", "count": 0, "active_user": "LOCAL_USER"})
@@ -461,7 +548,6 @@ def handle_physical_press(pin):
             beep(1)
             session_data["add_time_choice"] = 1 - session_data["add_time_choice"]
         elif s == "BOTTLE_RESULT":
-            # Toggle cursor between YES (0) and NO (1)
             beep(1)
             session_data["bottle_result_choice"] = 1 - session_data["bottle_result_choice"]
 
@@ -485,21 +571,18 @@ def handle_physical_press(pin):
             beep(1)
             choice = session_data.get("bottle_result_choice", 0)
             if choice == 0:
-                # YES — go back to inserting more bottles
                 session_data["state"] = "INSERTING"
             else:
-                # NO — proceed to slot selection if points exist, else IDLE
                 if session_data["count"] > 0:
                     session_data["state"] = "SELECTING"
                 else:
-                    session_data["state"] = "IDLE"
-                    session_data["active_user"] = None
+                    session_data.update({"state": "IDLE", "active_user": None})
 
 def finalize_transaction():
     slot = session_data["selected_slot"]
     pts  = session_data["count"]
     beep(2)
-    start_or_extend_relay(slot, pts * 300)   # 1 pt = 5 min = 300s
+    start_or_extend_relay(slot, pts * 300)
     session_data["state"] = "THANK_YOU"
     lcd_write(["     THANK YOU!     ", " You helped protect ", " our environment by ", " recycling plastic! "])
     threading.Timer(4.0, lambda: session_data.update({"state": "IDLE", "count": 0, "active_user": None})).start()
@@ -512,7 +595,7 @@ def hardware_loop():
     last_val    = {p: 1   for p in btn_pins}
     last_press  = {p: 0.0 for p in btn_pins}
     ir_cooldown = 0
-    ir_last_bot = 1   # assume HIGH (nothing blocking) at startup
+    ir_last_bot = 1
     ir_last_top = 1
 
     while True:
@@ -542,27 +625,22 @@ def hardware_loop():
         else:
             for p in btn_pins: last_val[p] = 0; last_press[p] = now
 
-        # ── IR sensor — Active LOW, falling edge only ──────────
+        # ── IR sensors: Active LOW, falling edge (1→0) ──────
         bot = gpio_read(PIN_IR_BOTTOM)
         top = gpio_read(PIN_IR_TOP)
 
         if session_data["state"] == "INSERTING" and now >= ir_cooldown \
                 and not admin_data["active"] and not bottle_lock.locked():
-
-            triggered = (bot == 0 and ir_last_bot == 1) or \
-                        (top == 0 and ir_last_top == 1)
-
-            if triggered:
+            if (bot == 0 and ir_last_bot == 1) or (top == 0 and ir_last_top == 1):
                 session_data["last_activity"] = now
                 ir_cooldown = now + 6.0
                 beep_now(1)
                 threading.Thread(target=process_bottle, daemon=True).start()
 
-        # Always update IR last-state OUTSIDE the state/cooldown check
         ir_last_bot = bot
         ir_last_top = top
 
-        # ── Auto timeout 30s ───────────────────────────────────
+        # ── Auto timeout 30s ─────────────────────────────────
         if not admin_data["active"]:
             if session_data["state"] == "INSERTING":
                 w = hx_get_grams()
@@ -585,60 +663,69 @@ def hardware_loop():
             session_data["last_activity"] = now
 
         time.sleep(0.01)
+
 # ═══════════════════════════════════════════════════════════
 # DISPLAY MANAGER
 # ═══════════════════════════════════════════════════════════
 def display_manager():
+    """
+    Builds the desired LCD lines and posts them via lcd_write().
+    Does NOT do any I2C itself — lcd_writer_thread owns the bus.
+    No sleep on lcd_lock — just posts and moves on immediately.
+    """
     last_lines = []
-    while True:
-        if lcd_lock.locked():
-            time.sleep(0.05); continue
 
+    while True:
         s = session_data["state"]
 
         if admin_data["active"]:
-            db = load_db(); users = list(db["users"].items()); total = db.get("total_bottles", 0)
+            db = load_db()
+            users = list(db["users"].items())
+            total = db.get("total_bottles", 0)
             if users:
-                idx = admin_data["user_index"] % len(users); uid, udata = users[idx]; pts = udata.get("points", 0)
-                lines = ["  ** ADMIN MODE **  ", f"ID:{uid[:16]}", f"PTS:{pts}  {idx+1}/{len(users)}", "B1:RST B2:NXT B3:EXIT"]
+                idx = admin_data["user_index"] % len(users)
+                uid, udata = users[idx]
+                pts = udata.get("points", 0)
+                lines = ["  ** ADMIN MODE **  ",
+                         f"ID:{uid[:16]}",
+                         f"PTS:{pts}  {idx+1}/{len(users)}",
+                         "B1:RST B2:NXT B3:EXIT"]
             else:
-                lines = ["  ** ADMIN MODE **  ", f" TOTAL:{total} bottles", "   No users yet", "B1:RST       B3:EXIT"]
+                lines = ["  ** ADMIN MODE **  ",
+                         f" TOTAL:{total} bottles",
+                         "   No users yet",
+                         "B1:RST       B3:EXIT"]
 
         elif s == "IDLE":
             t1 = f"U1:{format_time(slot_status[0])} U2:{format_time(slot_status[1])}"
             t2 = f"U3:{format_time(slot_status[2])} AC:{format_time(slot_status[3])}"
-            lines = ["      RAYCHARGE    ", "     PRESS START    ", t1, t2]
+            lines = ["      RAYCHARGE     ", "     PRESS START    ", t1, t2]
 
         elif s == "INSERTING":
             cnt = session_data['count']
-            lines = ["   INSERT BOTTLE    ",
+            # Show web indicator if session started from web
+            src = " [WEB]" if is_web_session() else "      "
+            lines = [f"  INSERT BOTTLE{src}"[:20],
                      f"   BOTTLES: {cnt}        "[:20],
                      f"   TIME: {cnt*5}m          "[:20],
-                     "   B3:CONFIRM       "]
+                     "  IR:INSERT  B3:DONE"]
 
         elif s == "BOTTLE_RESULT":
             result = session_data.get("bottle_result", "error")
             choice = session_data.get("bottle_result_choice", 0)
             cnt    = session_data["count"]
-
-            # Header line based on outcome
+            msg    = session_data.get("last_bottle_msg", "ACCEPTED")
             if result == "accepted":
-                header = f"  Total: {cnt} pts        "[:20]
+                line1 = f"  {msg}        "[:20]
+                line2 = f"  Total: {cnt} pts        "[:20]
             elif result == "rejected":
-                header = "  INVALID BOTTLE!   "
+                line1 = "  INVALID BOTTLE!   "
+                line2 = "  Not accepted      "
             else:
-                header = "  NO BOTTLE DET.!   "
-
-            # Cursor arrow on selected option
-            if choice == 0:
-                toggle = ">INSERT    NO(DONE) "
-            else:
-                toggle = " INSERT   >NO(DONE) "
-
-            lines = [header,
-                     "  Insert another?   ",
-                     toggle,
-                     " B2:TOGGLE  B3:OK   "]
+                line1 = "  NO BOTTLE DET.!   "
+                line2 = "  Try again         "
+            toggle = ">INSERT    NO(DONE) " if choice == 0 else " INSERT   >NO(DONE) "
+            lines = [line1, line2, toggle, " B2:TOGGLE  B3:OK   "]
 
         elif s == "SELECTING":
             lines = ["      SELECT        ",
@@ -650,15 +737,18 @@ def display_manager():
             ch = "> YES   NO          " if session_data["add_time_choice"] == 1 else "  YES > NO          "
             lines = ["   ADD MINUTES TO   ",
                      f"   {SLOT_NAMES[session_data['selected_slot']]}?           "[:20],
-                     ch, "  B2:MOVE  B3:OK    "]
+                     ch,
+                     "  B2:MOVE  B3:OK    "]
 
         else:
-            time.sleep(0.05); continue
+            time.sleep(0.02)
+            continue
 
         if lines != last_lines:
-            lcd_write(lines); last_lines = lines[:]
+            lcd_write(lines)
+            last_lines = lines[:]
 
-        time.sleep(0.05)
+        time.sleep(0.02)   # 20 ms — display_manager just builds strings, very cheap
 
 # ═══════════════════════════════════════════════════════════
 # FLASK
@@ -739,7 +829,7 @@ def redeem(slot, pts):
     if db["users"][uid]["points"] >= pts:
         db["users"][uid]["points"] -= pts
         db["logs"].append([time.strftime("%H:%M"), f"-{pts} Pts", SLOT_NAMES[slot]]); save_db(db)
-        start_or_extend_relay(slot, pts * 300)   # 1 pt = 5 min = 300s
+        start_or_extend_relay(slot, pts * 300)
         beep(2)
     return redirect(url_for('index'))
 
@@ -748,6 +838,7 @@ def redeem(slot, pts):
 # ═══════════════════════════════════════════════════════════
 if __name__ == '__main__':
     subprocess.run(["sudo", "fuser", "-k", "80/tcp"], capture_output=True)
+
     gpio_setup(PIN_BUZZER, "out", "0"); gpio_write(PIN_BUZZER, 0)
     gpio_setup(PIN_SERVO,  "out", "0"); gpio_write(PIN_SERVO,  0)
     for p in PINS_RELAYS: gpio_setup(p, "out", "0"); gpio_write(p, 0)
@@ -755,8 +846,12 @@ if __name__ == '__main__':
     init_lcd()
     lcd_write(["     RAYCHARGE    ", "   Initializing...  ", "                    ", "                    "])
 
-    for p in [PIN_IR_BOTTOM, PIN_IR_TOP, PIN_BTN_START, PIN_BTN_SELECT, PIN_BTN_CONFIRM]:
-        gpio_setup(p, "in")
+    print("Setting pull-ups...")
+    gpio_setup(PIN_IR_BOTTOM,   "in", pull="up")
+    gpio_setup(PIN_IR_TOP,      "in", pull="up")
+    gpio_setup(PIN_BTN_START,   "in", pull="up")
+    gpio_setup(PIN_BTN_SELECT,  "in", pull="up")
+    gpio_setup(PIN_BTN_CONFIRM, "in", pull="up")
 
     time.sleep(0.5)
     servo_init()
@@ -765,6 +860,7 @@ if __name__ == '__main__':
 
     lcd_write(["     RAYCHARGE     ", "    PRESS START     ", "                    ", "                    "])
 
-    threading.Thread(target=hardware_loop,   daemon=True).start()
-    threading.Thread(target=display_manager, daemon=True).start()
+    threading.Thread(target=lcd_writer_thread, daemon=True).start()
+    threading.Thread(target=hardware_loop,     daemon=True).start()
+    threading.Thread(target=display_manager,   daemon=True).start()
     app.run(host='0.0.0.0', port=80)

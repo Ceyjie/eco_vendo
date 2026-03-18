@@ -1,4 +1,5 @@
 import time, threading, os, subprocess, json, uuid, signal
+import mmap, struct, queue
 from flask import Flask, jsonify, render_template, request, redirect, url_for, make_response, send_from_directory
 from RPLCD.i2c import CharLCD
 
@@ -30,8 +31,6 @@ WEIGHT_BIG_MAX    = 39
 # ═══════════════════════════════════════════════════════════
 # SERVO
 # ═══════════════════════════════════════════════════════════
-import mmap, struct, queue
-
 PULSE_MIN_MS   = 0.5
 PULSE_MAX_MS   = 2.5
 PERIOD_MS      = 20.0
@@ -118,8 +117,8 @@ session_data = {
     "add_time_choice": 1,
     "last_activity": time.time(),
     "last_bottle_msg": "",
-    "bottle_result": "error",       # "accepted" | "rejected" | "error"
-    "bottle_result_choice": 0       # 0 = YES (insert another), 1 = NO (done)
+    "bottle_result": "error",
+    "bottle_result_choice": 0
 }
 slot_status = {0: 0, 1: 0, 2: 0, 3: 0}
 admin_data  = {"active": False, "user_index": 0, "hold_start": 0, "holding": False}
@@ -138,9 +137,78 @@ def save_db(data):
     with open(DB_FILE, 'w') as f: json.dump(data, f)
 
 # ═══════════════════════════════════════════════════════════
-# GPIO
+# GPIO — Allwinner H3 pull-up support (Orange Pi One)
 # ═══════════════════════════════════════════════════════════
-def gpio_setup(pin, direction="in", value="0"):
+#
+# H3 GPIO register layout per port:
+#   offset +0x00 : CFG0  (pin 0-7  function select)
+#   offset +0x04 : CFG1  (pin 8-15 function select)
+#   offset +0x08 : CFG2  (pin 16-23)
+#   offset +0x0C : CFG3  (pin 24-31)
+#   offset +0x10 : DAT   (data register)
+#   offset +0x14 : DRV0
+#   offset +0x18 : DRV1
+#   offset +0x1C : PUL0  (pull for pin 0-15,  2 bits each)
+#   offset +0x20 : PUL1  (pull for pin 16-31, 2 bits each)
+#
+# Port base addresses:
+#   PA = 0x01C20800   PB = 0x01C20824   PC = 0x01C20848
+#   PD = 0x01C2086C   PE = 0x01C20890   PF = 0x01C208B4
+#   PG = 0x01C208D8
+#
+# sysfs number = (port - A) * 32 + pin_index
+#   PA0=0  PA1=1  PA6=6  PA10=10  PA13=13  PA14=14  PA21=21
+#   PC3=67   (PC = port 2, sysfs = 64+3)
+#   PD14=110 (PD = port 3, sysfs = 96+14)
+#
+# PUL values: 00=Hi-Z, 01=pull-up, 10=pull-down
+
+H3_PULL_MAP = {
+    # sysfs_pin : (PUL_register_address, bit_shift)
+    # PA port — PUL0 covers PA0-PA15, PUL1 covers PA16-PA21
+    "0":  (0x01C2081C,  0),   # PA0
+    "1":  (0x01C2081C,  2),   # PA1
+    "2":  (0x01C2081C,  4),   # PA2
+    "3":  (0x01C2081C,  6),   # PA3
+    "6":  (0x01C2081C, 12),   # PA6
+    "10": (0x01C2081C, 20),   # PA10
+    "13": (0x01C2081C, 26),   # PA13
+    "14": (0x01C2081C, 28),   # PA14
+    "21": (0x01C20820, 10),   # PA21 → PUL1 (PA16=bit0 … PA21=bit10)
+    # PC port — base 0x01C20848, PUL0 = base+0x1C = 0x01C20864
+    "67": (0x01C20864,  6),   # PC3
+    # PD port — base 0x01C2086C, PUL0 = base+0x1C = 0x01C20888
+    #           PUL1 = base+0x20 = 0x01C2088C
+    "110":(0x01C20888, 28),   # PD14 → PUL0 bit 28
+}
+
+def _gpio_set_pull(pin, mode="up"):
+    """Apply internal pull-up/down to an H3 GPIO via /dev/mem."""
+    if pin not in H3_PULL_MAP:
+        print(f"Pull: no H3 map for pin {pin}, skipped")
+        return
+    reg_addr, bit_shift = H3_PULL_MAP[pin]
+    val = 0b01 if mode == "up" else (0b10 if mode == "down" else 0b00)
+    try:
+        fd  = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+        mem = mmap.mmap(fd, 4096, mmap.MAP_SHARED,
+                        mmap.PROT_READ | mmap.PROT_WRITE,
+                        offset=reg_addr & ~0xFFF)
+        os.close(fd)
+        off = reg_addr & 0xFFF
+        cur = struct.unpack_from("<I", mem, off)[0]
+        cur = (cur & ~(0b11 << bit_shift)) | (val << bit_shift)
+        struct.pack_into("<I", mem, off, cur)
+        mem.close()
+        print(f"  pull-{mode} OK  pin={pin}  reg=0x{reg_addr:08X}  bit={bit_shift}")
+    except Exception as e:
+        print(f"  pull FAILED pin={pin}: {e}")
+
+def gpio_setup(pin, direction="in", value="0", pull=None):
+    """
+    Export and configure a GPIO pin.
+    pull = "up" | "down" | None   (only applied to input pins)
+    """
     path = f"/sys/class/gpio/gpio{pin}"
     if not os.path.exists(path):
         try:
@@ -150,15 +218,20 @@ def gpio_setup(pin, direction="in", value="0"):
     with open(f"{path}/direction", "w") as f: f.write(direction)
     if direction == "out":
         with open(f"{path}/value", "w") as f: f.write(value)
+    if pull and direction == "in":
+        _gpio_set_pull(pin, pull)
 
 def gpio_read(pin):
     try:
-        with open(f"/sys/class/gpio/gpio{pin}/value", "r") as f: return int(f.read().strip())
-    except: return 1
+        with open(f"/sys/class/gpio/gpio{pin}/value", "r") as f:
+            return int(f.read().strip())
+    except:
+        return 1
 
 def gpio_write(pin, val):
     try:
-        with open(f"/sys/class/gpio/gpio{pin}/value", "w") as f: f.write(str(val))
+        with open(f"/sys/class/gpio/gpio{pin}/value", "w") as f:
+            f.write(str(val))
     except: pass
 
 def beep(times=1):
@@ -269,13 +342,12 @@ def classify_bottle(weight_g):
         return 0, None,     "  INVALID BOTTLE!   ", f"  {weight_g:.0f}g not accepted  "[:20]
 
 # ═══════════════════════════════════════════════════════════
-# BOTTLE RESULT PROMPT HELPER
+# BOTTLE RESULT HELPER
 # ═══════════════════════════════════════════════════════════
 def set_bottle_result(result_type):
-    """Transition to BOTTLE_RESULT state after any bottle outcome."""
-    session_data["state"]               = "BOTTLE_RESULT"
-    session_data["bottle_result"]       = result_type   # "accepted" | "rejected" | "error"
-    session_data["bottle_result_choice"] = 0            # default cursor on YES
+    session_data["state"]                = "BOTTLE_RESULT"
+    session_data["bottle_result"]        = result_type
+    session_data["bottle_result_choice"] = 0
 
 # ═══════════════════════════════════════════════════════════
 # BOTTLE PROCESSING
@@ -288,12 +360,10 @@ def process_bottle():
 def _process_bottle_inner():
     servo_goto(90, hold=0.3)
 
-    # First check — confirm something is actually on the sensor
     lcd_write_force(["    BOTTLE SENSED   ", "    Checking...     ",
                      "  Place on sensor   ", "  Hold still...     "])
     time.sleep(0.5)
 
-    # Quick pre-check: if no weight detected within 2s, abort
     pre_check = False
     for _ in range(10):
         w = hx_get_grams()
@@ -385,7 +455,6 @@ def _process_bottle_inner():
                          f"  Total: {total} pts        "[:20],
                          "  Keep recycling!   "])
         time.sleep(2)
-
         set_bottle_result("accepted")
 
     else:
@@ -461,7 +530,6 @@ def handle_physical_press(pin):
             beep(1)
             session_data["add_time_choice"] = 1 - session_data["add_time_choice"]
         elif s == "BOTTLE_RESULT":
-            # Toggle cursor between YES (0) and NO (1)
             beep(1)
             session_data["bottle_result_choice"] = 1 - session_data["bottle_result_choice"]
 
@@ -485,21 +553,18 @@ def handle_physical_press(pin):
             beep(1)
             choice = session_data.get("bottle_result_choice", 0)
             if choice == 0:
-                # YES — go back to inserting more bottles
                 session_data["state"] = "INSERTING"
             else:
-                # NO — proceed to slot selection if points exist, else IDLE
                 if session_data["count"] > 0:
                     session_data["state"] = "SELECTING"
                 else:
-                    session_data["state"] = "IDLE"
-                    session_data["active_user"] = None
+                    session_data.update({"state": "IDLE", "active_user": None})
 
 def finalize_transaction():
     slot = session_data["selected_slot"]
     pts  = session_data["count"]
     beep(2)
-    start_or_extend_relay(slot, pts * 300)   # 1 pt = 5 min = 300s
+    start_or_extend_relay(slot, pts * 300)
     session_data["state"] = "THANK_YOU"
     lcd_write(["     THANK YOU!     ", " You helped protect ", " our environment by ", " recycling plastic! "])
     threading.Timer(4.0, lambda: session_data.update({"state": "IDLE", "count": 0, "active_user": None})).start()
@@ -512,7 +577,7 @@ def hardware_loop():
     last_val    = {p: 1   for p in btn_pins}
     last_press  = {p: 0.0 for p in btn_pins}
     ir_cooldown = 0
-    ir_last_bot = 1   # assume HIGH (nothing blocking) at startup
+    ir_last_bot = 1
     ir_last_top = 1
 
     while True:
@@ -542,27 +607,23 @@ def hardware_loop():
         else:
             for p in btn_pins: last_val[p] = 0; last_press[p] = now
 
-        # ── IR sensor — Active LOW, falling edge only ──────────
+        # ── IR sensors: Active LOW, falling edge (1→0) ──────────
+        # Read ALWAYS outside state check so ir_last_* stays current
         bot = gpio_read(PIN_IR_BOTTOM)
         top = gpio_read(PIN_IR_TOP)
 
         if session_data["state"] == "INSERTING" and now >= ir_cooldown \
                 and not admin_data["active"] and not bottle_lock.locked():
-
-            triggered = (bot == 0 and ir_last_bot == 1) or \
-                        (top == 0 and ir_last_top == 1)
-
-            if triggered:
+            if (bot == 0 and ir_last_bot == 1) or (top == 0 and ir_last_top == 1):
                 session_data["last_activity"] = now
                 ir_cooldown = now + 6.0
                 beep_now(1)
                 threading.Thread(target=process_bottle, daemon=True).start()
 
-        # Always update IR last-state OUTSIDE the state/cooldown check
         ir_last_bot = bot
         ir_last_top = top
 
-        # ── Auto timeout 30s ───────────────────────────────────
+        # ── Auto timeout 30s ─────────────────────────────────────
         if not admin_data["active"]:
             if session_data["state"] == "INSERTING":
                 w = hx_get_grams()
@@ -585,6 +646,7 @@ def hardware_loop():
             session_data["last_activity"] = now
 
         time.sleep(0.01)
+
 # ═══════════════════════════════════════════════════════════
 # DISPLAY MANAGER
 # ═══════════════════════════════════════════════════════════
@@ -620,25 +682,14 @@ def display_manager():
             result = session_data.get("bottle_result", "error")
             choice = session_data.get("bottle_result_choice", 0)
             cnt    = session_data["count"]
-
-            # Header line based on outcome
             if result == "accepted":
                 header = f"  Total: {cnt} pts        "[:20]
             elif result == "rejected":
                 header = "  INVALID BOTTLE!   "
             else:
                 header = "  NO BOTTLE DET.!   "
-
-            # Cursor arrow on selected option
-            if choice == 0:
-                toggle = ">INSERT    NO(DONE) "
-            else:
-                toggle = " INSERT   >NO(DONE) "
-
-            lines = [header,
-                     "  Insert another?   ",
-                     toggle,
-                     " B2:TOGGLE  B3:OK   "]
+            toggle = ">INSERT    NO(DONE) " if choice == 0 else " INSERT   >NO(DONE) "
+            lines = [header, "  Insert another?   ", toggle, " B2:TOGGLE  B3:OK   "]
 
         elif s == "SELECTING":
             lines = ["      SELECT        ",
@@ -739,7 +790,7 @@ def redeem(slot, pts):
     if db["users"][uid]["points"] >= pts:
         db["users"][uid]["points"] -= pts
         db["logs"].append([time.strftime("%H:%M"), f"-{pts} Pts", SLOT_NAMES[slot]]); save_db(db)
-        start_or_extend_relay(slot, pts * 300)   # 1 pt = 5 min = 300s
+        start_or_extend_relay(slot, pts * 300)
         beep(2)
     return redirect(url_for('index'))
 
@@ -748,6 +799,7 @@ def redeem(slot, pts):
 # ═══════════════════════════════════════════════════════════
 if __name__ == '__main__':
     subprocess.run(["sudo", "fuser", "-k", "80/tcp"], capture_output=True)
+
     gpio_setup(PIN_BUZZER, "out", "0"); gpio_write(PIN_BUZZER, 0)
     gpio_setup(PIN_SERVO,  "out", "0"); gpio_write(PIN_SERVO,  0)
     for p in PINS_RELAYS: gpio_setup(p, "out", "0"); gpio_write(p, 0)
@@ -755,8 +807,13 @@ if __name__ == '__main__':
     init_lcd()
     lcd_write(["     RAYCHARGE    ", "   Initializing...  ", "                    ", "                    "])
 
-    for p in [PIN_IR_BOTTOM, PIN_IR_TOP, PIN_BTN_START, PIN_BTN_SELECT, PIN_BTN_CONFIRM]:
-        gpio_setup(p, "in")
+    # Input pins — pull-up prevents floating / oscillation
+    print("Setting pull-ups...")
+    gpio_setup(PIN_IR_BOTTOM,   "in", pull="up")
+    gpio_setup(PIN_IR_TOP,      "in", pull="up")
+    gpio_setup(PIN_BTN_START,   "in", pull="up")
+    gpio_setup(PIN_BTN_SELECT,  "in", pull="up")
+    gpio_setup(PIN_BTN_CONFIRM, "in", pull="up")
 
     time.sleep(0.5)
     servo_init()

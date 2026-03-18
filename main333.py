@@ -118,8 +118,8 @@ session_data = {
     "add_time_choice": 1,
     "last_activity": time.time(),
     "last_bottle_msg": "",
-    "bottle_result": "error",       # "accepted" | "rejected" | "error"
-    "bottle_result_choice": 0       # 0 = YES (insert another), 1 = NO (done)
+    "bottle_result": "error",        # "accepted" | "rejected" | "error"
+    "bottle_result_choice": 0        # 0 = YES (insert another), 1 = NO (done)
 }
 slot_status = {0: 0, 1: 0, 2: 0, 3: 0}
 admin_data  = {"active": False, "user_index": 0, "hold_start": 0, "holding": False}
@@ -269,13 +269,13 @@ def classify_bottle(weight_g):
         return 0, None,     "  INVALID BOTTLE!   ", f"  {weight_g:.0f}g not accepted  "[:20]
 
 # ═══════════════════════════════════════════════════════════
-# BOTTLE RESULT PROMPT HELPER
+# BOTTLE RESULT HELPER
 # ═══════════════════════════════════════════════════════════
 def set_bottle_result(result_type):
-    """Transition to BOTTLE_RESULT state after any bottle outcome."""
-    session_data["state"]               = "BOTTLE_RESULT"
-    session_data["bottle_result"]       = result_type   # "accepted" | "rejected" | "error"
-    session_data["bottle_result_choice"] = 0            # default cursor on YES
+    """Transition into BOTTLE_RESULT prompt after any bottle outcome."""
+    session_data["state"]                = "BOTTLE_RESULT"
+    session_data["bottle_result"]        = result_type  # "accepted" | "rejected" | "error"
+    session_data["bottle_result_choice"] = 0            # default cursor on YES (insert another)
 
 # ═══════════════════════════════════════════════════════════
 # BOTTLE PROCESSING
@@ -288,7 +288,6 @@ def process_bottle():
 def _process_bottle_inner():
     servo_goto(90, hold=0.3)
 
-    # First check — confirm something is actually on the sensor
     lcd_write_force(["    BOTTLE SENSED   ", "    Checking...     ",
                      "  Place on sensor   ", "  Hold still...     "])
     time.sleep(0.5)
@@ -461,7 +460,7 @@ def handle_physical_press(pin):
             beep(1)
             session_data["add_time_choice"] = 1 - session_data["add_time_choice"]
         elif s == "BOTTLE_RESULT":
-            # Toggle cursor between YES (0) and NO (1)
+            # Toggle: 0 = >INSERT (yes, another), 1 = >NO(DONE)
             beep(1)
             session_data["bottle_result_choice"] = 1 - session_data["bottle_result_choice"]
 
@@ -485,15 +484,14 @@ def handle_physical_press(pin):
             beep(1)
             choice = session_data.get("bottle_result_choice", 0)
             if choice == 0:
-                # YES — go back to inserting more bottles
+                # YES — insert another bottle
                 session_data["state"] = "INSERTING"
             else:
-                # NO — proceed to slot selection if points exist, else IDLE
+                # NO — go to slot selection if points exist, else IDLE
                 if session_data["count"] > 0:
                     session_data["state"] = "SELECTING"
                 else:
-                    session_data["state"] = "IDLE"
-                    session_data["active_user"] = None
+                    session_data.update({"state": "IDLE", "active_user": None})
 
 def finalize_transaction():
     slot = session_data["selected_slot"]
@@ -512,7 +510,7 @@ def hardware_loop():
     last_val    = {p: 1   for p in btn_pins}
     last_press  = {p: 0.0 for p in btn_pins}
     ir_cooldown = 0
-    ir_last_bot = 1   # assume HIGH (nothing blocking) at startup
+    ir_last_bot = 1   # assume HIGH (idle/unblocked) at startup
     ir_last_top = 1
 
     while True:
@@ -542,27 +540,24 @@ def hardware_loop():
         else:
             for p in btn_pins: last_val[p] = 0; last_press[p] = now
 
-        # ── IR sensor — Active LOW, falling edge only ──────────
+        # ── IR sensors: Active LOW — read ALWAYS so ir_last_* stays current ──
         bot = gpio_read(PIN_IR_BOTTOM)
         top = gpio_read(PIN_IR_TOP)
 
         if session_data["state"] == "INSERTING" and now >= ir_cooldown \
                 and not admin_data["active"] and not bottle_lock.locked():
-
-            triggered = (bot == 0 and ir_last_bot == 1) or \
-                        (top == 0 and ir_last_top == 1)
-
-            if triggered:
+            # Falling edge (1→0) on either sensor = bottle inserted
+            if (bot == 0 and ir_last_bot == 1) or (top == 0 and ir_last_top == 1):
                 session_data["last_activity"] = now
-                ir_cooldown = now + 6.0
+                ir_cooldown = now + 6.0          # set BEFORE spawning thread
                 beep_now(1)
                 threading.Thread(target=process_bottle, daemon=True).start()
 
-        # Always update IR last-state OUTSIDE the state/cooldown check
+        # Always update last IR state — even during cooldown or wrong state
         ir_last_bot = bot
         ir_last_top = top
 
-        # ── Auto timeout 30s ───────────────────────────────────
+        # ── Auto timeout 30s ────────────────────────────────────
         if not admin_data["active"]:
             if session_data["state"] == "INSERTING":
                 w = hx_get_grams()
@@ -585,6 +580,7 @@ def hardware_loop():
             session_data["last_activity"] = now
 
         time.sleep(0.01)
+
 # ═══════════════════════════════════════════════════════════
 # DISPLAY MANAGER
 # ═══════════════════════════════════════════════════════════
@@ -621,7 +617,6 @@ def display_manager():
             choice = session_data.get("bottle_result_choice", 0)
             cnt    = session_data["count"]
 
-            # Header line based on outcome
             if result == "accepted":
                 header = f"  Total: {cnt} pts        "[:20]
             elif result == "rejected":
@@ -629,7 +624,7 @@ def display_manager():
             else:
                 header = "  NO BOTTLE DET.!   "
 
-            # Cursor arrow on selected option
+            # > arrow on currently selected option
             if choice == 0:
                 toggle = ">INSERT    NO(DONE) "
             else:
